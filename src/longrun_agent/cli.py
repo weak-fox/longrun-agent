@@ -14,6 +14,7 @@ from textwrap import dedent
 from typing import Sequence
 
 from .backends.factory import create_backend
+from .ci_pipeline import PullRequestContext, plan_pipeline_for_pr
 from .config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_COMMAND_TEMPLATE,
@@ -223,6 +224,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print status as JSON",
+    )
+
+    simulate_pr = subparsers.add_parser(
+        "simulate-pr",
+        help="Simulate CI stage scheduling for a PR update",
+    )
+    simulate_pr.add_argument(
+        "--repository-language",
+        type=str,
+        default="go",
+        help="Repository primary language (default: go)",
+    )
+    simulate_pr.add_argument(
+        "--source-branch",
+        type=str,
+        required=True,
+        help="PR source branch name (e.g. feature/my-change)",
+    )
+    simulate_pr.add_argument(
+        "--target-branch",
+        type=str,
+        required=True,
+        help="PR target branch name (e.g. develop or main)",
+    )
+    simulate_pr.add_argument(
+        "--commit-sha",
+        type=str,
+        required=True,
+        help="Commit SHA included in the PR update",
     )
 
     configure = subparsers.add_parser(
@@ -1232,6 +1262,31 @@ def run_status(config_path: Path, as_json: bool) -> int:
     return 0
 
 
+def run_simulate_pr(
+    *,
+    repository_language: str,
+    source_branch: str,
+    target_branch: str,
+    commit_sha: str,
+) -> int:
+    context = PullRequestContext(
+        repository_language=repository_language,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        commit_sha=commit_sha,
+    )
+    plan = plan_pipeline_for_pr(context)
+
+    print(
+        "PR update:"
+        f" {context.source_branch} -> {context.target_branch}"
+        f" ({context.repository_language}) commit={context.commit_sha}"
+    )
+    for index, stage in enumerate(plan.stages, start=1):
+        print(f"stage {index}: {stage.label}")
+    return 0
+
+
 def _prompt_text(label: str, current: str) -> str:
     value = input(f"{label} [{current}]: ").strip()
     return value or current
@@ -1410,6 +1465,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress_update_required=args.progress_update_required,
             repair_on_verification_failure=args.repair_on_verification_failure,
             non_interactive=args.non_interactive,
+        )
+
+    if args.command == "simulate-pr":
+        return run_simulate_pr(
+            repository_language=args.repository_language,
+            source_branch=args.source_branch,
+            target_branch=args.target_branch,
+            commit_sha=args.commit_sha,
         )
 
     parser.error("unknown command")
