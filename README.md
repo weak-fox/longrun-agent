@@ -58,7 +58,7 @@ longrun-agent status [--json]
 
 运行目录中关键文件：
 - `app_spec.txt`：你要构建什么
-- `feature_list.json`：特性/测试清单（只允许更新 `passes`）
+- `feature_list.json`：特性/测试清单（只允许更新 `passes`；禁止修改描述、步骤、顺序）
 - `claude-progress.txt`：每轮摘要
 - `.longrun/sessions/session-XXXX/`：会话工件目录
 - `.longrun/remediation/session-XXXX.json`：门禁失败修正报告
@@ -69,6 +69,26 @@ longrun-agent status [--json]
 - `repair`：当验证失败且允许自动修复时触发
 
 ## 快速开始（推荐路径）
+
+### 0) 本地初始化（推荐先执行）
+
+```bash
+./init.sh
+```
+
+`init.sh` 会自动：
+- 创建/复用 `.venv-longrun`
+- 安装当前项目（editable 模式）
+- 在缺少核心文件时执行 `longrun-agent bootstrap`
+- 校验 `feature_list.json` 结构
+
+初始化完成后：
+
+```bash
+source .venv-longrun/bin/activate
+longrun-agent status
+longrun-agent run-session
+```
 
 ### 1) 安装
 
