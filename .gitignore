@@ -29,10 +29,12 @@ app_spec.txt
 claude-progress.txt
 feature_list.json
 init.sh
+longrun-agent.toml
 
 # local planning/checklist notes
 docs/plans/
 docs/*checklist*
+docs/anthropic-harness-notes.md
 task_plan.md
 findings.md
 progress.md
