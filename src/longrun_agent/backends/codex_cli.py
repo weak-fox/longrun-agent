@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -80,7 +81,10 @@ class CodexCliBackend(AgentBackend):
                 raise ValueError(msg) from exc
         if not rendered:
             raise ValueError("codex command template is empty")
-        return self._inject_reasoning_effort_override(rendered, reasoning_toml)
+        rendered = self._inject_reasoning_effort_override(rendered, reasoning_toml)
+        if bool(request.metadata.get("force_workspace_write")):
+            rendered = self._inject_workspace_write_override(rendered)
+        return rendered
 
     @staticmethod
     def _reasoning_effort_toml(effort: str | None) -> str | None:
@@ -118,3 +122,45 @@ class CodexCliBackend(AgentBackend):
                 return updated
 
         return rendered
+
+    def _inject_workspace_write_override(self, rendered: list[str]) -> list[str]:
+        if len(rendered) >= 2 and rendered[0] == "codex" and rendered[1] == "exec":
+            return self._set_or_insert_sandbox_tokens(rendered)
+
+        if len(rendered) >= 3 and rendered[0] in {"bash", "sh", "zsh"} and rendered[1] == "-lc":
+            command = rendered[2]
+            marker = "codex exec"
+            if marker in command:
+                updated = list(rendered)
+                if "--sandbox" in command or " -s " in command:
+                    with_named = re.sub(
+                        r"(--sandbox\s+)(read-only|workspace-write|danger-full-access)",
+                        r"\1workspace-write",
+                        command,
+                        count=1,
+                    )
+                    with_short = re.sub(
+                        r"(-s\s+)(read-only|workspace-write|danger-full-access)",
+                        r"\1workspace-write",
+                        with_named,
+                        count=1,
+                    )
+                    updated[2] = with_short
+                else:
+                    updated[2] = command.replace(
+                        marker,
+                        f"{marker} --sandbox workspace-write",
+                        1,
+                    )
+                return updated
+
+        return rendered
+
+    @staticmethod
+    def _set_or_insert_sandbox_tokens(rendered: list[str]) -> list[str]:
+        updated = list(rendered)
+        for i, token in enumerate(updated):
+            if token in {"--sandbox", "-s"} and i + 1 < len(updated):
+                updated[i + 1] = "workspace-write"
+                return updated
+        return [*updated[:2], "--sandbox", "workspace-write", *updated[2:]]

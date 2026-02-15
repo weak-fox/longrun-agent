@@ -154,3 +154,27 @@ def test_codex_backend_injects_reasoning_effort_for_codex_exec(tmp_path: Path) -
         "-c",
         'model_reasoning_effort="xhigh"',
     ]
+
+
+def test_codex_backend_can_force_workspace_write_sandbox(tmp_path: Path) -> None:
+    session_dir = tmp_path / ".longrun" / "sessions" / "session-0006"
+    prompt_file = session_dir / "prompt.md"
+    backend = CodexCliBackend(
+        project_dir=tmp_path,
+        command_template=["codex", "exec", "-m", "{backend_model}"],
+    )
+    request = AgentRunRequest(
+        phase="coding",
+        project_dir=tmp_path,
+        prompt_file=prompt_file,
+        session_dir=session_dir,
+        timeout_seconds=30,
+        backend_model="gpt-5.3-codex",
+        metadata={"force_workspace_write": True},
+    )
+
+    rendered = backend._render_command(request)
+
+    assert "--sandbox" in rendered
+    idx = rendered.index("--sandbox")
+    assert rendered[idx + 1] == "workspace-write"

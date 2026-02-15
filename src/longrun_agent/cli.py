@@ -131,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override model reasoning effort (codex_cli only)",
     )
+    run_loop.add_argument(
+        "--continue-on-failure",
+        action="store_true",
+        help="Do not stop loop on failed sessions; continue until max-sessions is reached",
+    )
 
     go = subparsers.add_parser(
         "go",
@@ -1043,11 +1048,19 @@ def run_one_session(
 def run_loop(
     config_path: Path,
     max_sessions: int | None,
+    continue_on_failure: bool = False,
     backend: str | None = None,
     profile: str | None = None,
     backend_model: str | None = None,
     model_reasoning_effort: str | None = None,
 ) -> int:
+    if continue_on_failure and max_sessions is None:
+        print(
+            "--continue-on-failure requires --max-sessions to avoid unbounded retries",
+            file=sys.stderr,
+        )
+        return 2
+
     config = load_config(config_path)
     _apply_runtime_overrides(
         config,
@@ -1057,7 +1070,10 @@ def run_loop(
         model_reasoning_effort=model_reasoning_effort,
     )
     harness = Harness(config)
-    results = harness.run_loop(max_sessions=max_sessions)
+    results = harness.run_loop(
+        max_sessions=max_sessions,
+        continue_on_failure=continue_on_failure,
+    )
 
     for result in results:
         print(
@@ -1351,6 +1367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_loop(
             resolved_config_path,
             args.max_sessions,
+            continue_on_failure=args.continue_on_failure,
             backend=args.backend,
             profile=args.profile,
             backend_model=args.backend_model,

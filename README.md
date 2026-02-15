@@ -25,7 +25,7 @@ longrun-agent bootstrap --guided
 longrun-agent configure [--non-interactive ...]
 longrun-agent go --goal "..."
 longrun-agent run-session [--backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
-longrun-agent run-loop [--max-sessions ... --backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
+longrun-agent run-loop [--max-sessions ... --continue-on-failure --backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
 longrun-agent status [--json]
 ```
 
@@ -48,6 +48,10 @@ longrun-agent status [--json]
 - `LR_BIN`：指定 `longrun-agent` 可执行文件路径
 - `PY_BIN`：指定 Python 路径
 - `KEEP_TMP=1`：失败后保留临时目录，便于排查
+
+Codex 沙箱说明：
+- 默认命令显式使用 `--sandbox workspace-write`。
+- 若日志出现 “read-only sandbox”，harness 会自动重试一次（workspace-write 强制覆盖）。
 
 提示：
 - Anthropic “文章同款”模式请使用：`--backend claude_sdk --profile article`
@@ -173,7 +177,7 @@ backend_model = "gpt-5.2-codex"
 model_reasoning_effort = "xhigh"
 
 [backends.codex_cli]
-command = ["bash", "-lc", "LONGRUN_PHASE=\"{phase}\" codex exec --skip-git-repo-check --full-auto -m \"{backend_model}\" -C \"{project_dir}\" < \"{prompt_file}\""]
+command = ["bash", "-lc", "LONGRUN_PHASE=\"{phase}\" codex exec --skip-git-repo-check --full-auto --sandbox workspace-write -m \"{backend_model}\" -C \"{project_dir}\" < \"{prompt_file}\""]
 model = "gpt-5.2-codex"
 timeout_seconds = 3600
 ```
@@ -266,6 +270,9 @@ longrun-agent run-loop \
   --profile article \
   --backend-model claude-sonnet-4-5-20250929 \
   --max-sessions 20
+
+# 连续失败时不中断（需要设置 max-sessions）
+longrun-agent run-loop --max-sessions 20 --continue-on-failure
 ```
 
 `run-session` 也支持同样的覆盖参数。

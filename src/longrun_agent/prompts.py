@@ -27,6 +27,7 @@ def build_initializer_prompt(app_spec: str, feature_target: int) -> str:
         4. Create `init.sh` that boots the project for later sessions.
         5. Create or update README with local run instructions.
         6. If git is initialized, make a commit describing initialization work.
+        7. Update `claude-progress.txt` with a concise summary of this session.
 
         ### Critical invariant
         Future sessions may only modify the `passes` field in feature_list.json.
@@ -79,7 +80,8 @@ def build_coding_prompt(
         3. Verify through real user-facing behavior (not just backend calls).
         4. Update only `passes` for verified features in feature_list.json.
         5. Never mutate feature descriptions, steps, or ordering.
-        6. Keep the working tree clean at session end where possible.
+        6. Update `claude-progress.txt` with what changed, verification results, and blockers.
+        7. Keep the working tree clean at session end where possible.
 
         ### App spec reminder
         {app_spec}

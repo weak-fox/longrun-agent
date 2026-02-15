@@ -14,7 +14,7 @@ DEFAULT_CODEX_MODEL = "gpt-5.2-codex"
 DEFAULT_CODEX_COMMAND_TEMPLATE = [
     "bash",
     "-lc",
-    'LONGRUN_PHASE="{phase}" codex exec --skip-git-repo-check --full-auto -m "{backend_model}" -C "{project_dir}" < "{prompt_file}"',
+    'LONGRUN_PHASE="{phase}" codex exec --skip-git-repo-check --full-auto --sandbox workspace-write -m "{backend_model}" -C "{project_dir}" < "{prompt_file}"',
 ]
 LEGACY_CODEX_COMMAND_TEMPLATE_WITHOUT_SKIP = [
     "bash",
@@ -25,6 +25,11 @@ LEGACY_CODEX_COMMAND_TEMPLATE_WITH_SKIP_NO_FULL_AUTO = [
     "bash",
     "-lc",
     'LONGRUN_PHASE="{phase}" codex exec --skip-git-repo-check -m "{backend_model}" -C "{project_dir}" < "{prompt_file}"',
+]
+LEGACY_CODEX_COMMAND_TEMPLATE_WITH_FULL_AUTO_NO_SANDBOX = [
+    "bash",
+    "-lc",
+    'LONGRUN_PHASE="{phase}" codex exec --skip-git-repo-check --full-auto -m "{backend_model}" -C "{project_dir}" < "{prompt_file}"',
 ]
 LEGACY_AGENT_PLACEHOLDER_COMMAND = ["echo", "configure agent.command in longrun-agent.toml"]
 LEGACY_CODEX_PLACEHOLDER_COMMAND = ["echo", "configure codex_cli command in longrun-agent.toml"]
@@ -172,6 +177,7 @@ def load_config(path: Path) -> HarnessConfig:
             LEGACY_CODEX_PLACEHOLDER_COMMAND,
             LEGACY_CODEX_COMMAND_TEMPLATE_WITHOUT_SKIP,
             LEGACY_CODEX_COMMAND_TEMPLATE_WITH_SKIP_NO_FULL_AUTO,
+            LEGACY_CODEX_COMMAND_TEMPLATE_WITH_FULL_AUTO_NO_SANDBOX,
         )
         or _is_legacy_codex_command_with_removed_flags(command)
     ):

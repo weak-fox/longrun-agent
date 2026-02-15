@@ -24,10 +24,34 @@ if phase == "initializer":
     (project_dir / "init.sh").write_text("#!/usr/bin/env bash\\necho init\\n")
     raise SystemExit(0)
 
+if phase == "repair":
+    print('{"decision":"continue","reason":"still pending"}')
+    raise SystemExit(0)
+
 features_path = project_dir / "feature_list.json"
 features = json.loads(features_path.read_text())
 
 if "__MODE__" == "progress":
+    for feature in features:
+        if not feature["passes"]:
+            feature["passes"] = True
+            break
+elif "__MODE__" == "fail-once-then-progress":
+    marker = project_dir / ".fail-once.marker"
+    if not marker.exists():
+        marker.write_text("1")
+        print("workspace is read-only sandbox", file=sys.stderr)
+        raise SystemExit(23)
+    for feature in features:
+        if not feature["passes"]:
+            feature["passes"] = True
+            break
+elif "__MODE__" == "fail-once-hard-then-progress":
+    marker = project_dir / ".fail-once-hard.marker"
+    if not marker.exists():
+        marker.write_text("1")
+        print("verification command failed", file=sys.stderr)
+        raise SystemExit(31)
     for feature in features:
         if not feature["passes"]:
             feature["passes"] = True
@@ -118,6 +142,29 @@ def test_run_loop_stops_after_consecutive_no_progress_sessions(tmp_path: Path) -
     assert results[2].phase == "coding"
     assert harness.last_loop_stop_reason is not None
     assert "no progress" in harness.last_loop_stop_reason.lower()
+
+
+def test_run_loop_can_continue_after_failed_session_when_enabled(tmp_path: Path) -> None:
+    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    script = _write_agent_script(tmp_path, mode="fail-once-hard-then-progress")
+
+    harness = Harness(
+        HarnessConfig(
+            project_dir=tmp_path,
+            agent_command=[sys.executable, str(script), "{project_dir}", "{phase}"],
+            feature_target=2,
+            bearings_commands=[],
+            verification_commands=[],
+            auto_continue_delay_seconds=0,
+        )
+    )
+
+    results = harness.run_loop(max_sessions=6, continue_on_failure=True)
+
+    assert len(results) >= 4
+    assert any(not item.success for item in results)
+    assert results[-1].success is True
+    assert results[-1].passing == results[-1].total
 
 
 def test_status_summary_returns_progress_and_session_info(tmp_path: Path) -> None:

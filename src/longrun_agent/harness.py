@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Any
+from typing import Any, Literal
 
 from .backends.factory import create_backend
 from .config import HarnessConfig
@@ -46,6 +46,13 @@ class SessionResult:
     total: int = 0
     progress_made: bool | None = None
     return_code: int | None = None
+
+
+@dataclass(slots=True)
+class NoChangeDecision:
+    action: Literal["continue", "mark_complete"]
+    reason: str
+    log_path: Path
 
 
 class Harness:
@@ -120,14 +127,13 @@ class Harness:
 
         app_spec = self.spec_file.read_text().strip()
         prompt_file = session_dir / "prompt.md"
-        git_head_before = self._current_git_head() if self.config.commit_required else None
-        progress_before_text = (
-            self.progress_file.read_text()
-            if self.config.progress_update_required and self.progress_file.exists()
-            else None
-        )
+        git_head_before = self._current_git_head()
+        git_status_before = self._git_status_porcelain()
+        progress_before_text = self.progress_file.read_text() if self.progress_file.exists() else ""
 
         before_features: list[dict[str, Any]] | None = None
+        pending_index: int | None = None
+        pending_feature: dict[str, Any] | None = None
 
         if phase == "initializer":
             prompt = self.prompt_provider.build_initializer_prompt(
@@ -204,13 +210,32 @@ class Harness:
             self._append_progress(result)
             return result
 
+        readonly_retry_attempted = False
+        readonly_retry_recovered = False
+        if not run["timeout"] and run["return_code"] != 0:
+            retried = self._retry_if_readonly_sandbox_failure(
+                phase=phase,
+                prompt_file=prompt_file,
+                session_dir=session_dir,
+                failed_run=run,
+            )
+            if retried is not None:
+                readonly_retry_attempted = True
+                run = retried
+                readonly_retry_recovered = not run["timeout"] and run["return_code"] == 0
+
         if run["timeout"]:
+            timeout_note = (
+                " (workspace-write retry attempted)"
+                if readonly_retry_attempted
+                else ""
+            )
             result = SessionResult(
                 session_id=session_id,
                 phase=phase,
                 success=False,
                 message=(
-                    f"Session timed out after {self.config.agent_timeout_seconds}s. "
+                    f"Session timed out after {self.config.agent_timeout_seconds}s{timeout_note}. "
                     f"Check logs: {self._display_path(run['stdout_path'])}, "
                     f"{self._display_path(run['stderr_path'])}"
                 ),
@@ -222,16 +247,24 @@ class Harness:
 
         if run["return_code"] != 0:
             stderr_tail = self._last_non_empty_log_line(run["stderr_path"])
+            retry_note = " (workspace-write retry attempted)" if readonly_retry_attempted else ""
+            hint = (
+                " If this keeps failing, use a codex command with "
+                "--dangerously-bypass-approvals-and-sandbox in an isolated environment."
+                if readonly_retry_attempted
+                else ""
+            )
             result = SessionResult(
                 session_id=session_id,
                 phase=phase,
                 success=False,
                 message=(
                     "Agent process exited with non-zero status "
-                    f"(code={run['return_code']}). "
+                    f"(code={run['return_code']}){retry_note}. "
                     f"Check logs: {self._display_path(run['stdout_path'])}, "
                     f"{self._display_path(run['stderr_path'])}"
                     + (f"; last stderr: {stderr_tail}" if stderr_tail else "")
+                    + hint
                 ),
                 return_code=run["return_code"],
             )
@@ -296,11 +329,87 @@ class Harness:
                 return_code=run["return_code"],
             )
 
-        passing, total = progress_counts(load_feature_list(self.feature_file))
+        after_features = load_feature_list(self.feature_file)
+        passing, total = progress_counts(after_features)
         progress_made = None
+        previous_passing: int | None = None
         if phase == "coding" and before_features is not None:
             previous_passing, _ = progress_counts(before_features)
             progress_made = passing > previous_passing
+
+        current_head = self._current_git_head()
+        git_status_after = self._git_status_porcelain()
+        current_progress_text = self.progress_file.read_text() if self.progress_file.exists() else ""
+        no_change_decision: NoChangeDecision | None = None
+
+        if (
+            phase == "coding"
+            and before_features is not None
+            and pending_index is not None
+            and previous_passing is not None
+            and self._session_has_no_observable_changes(
+                before_features=before_features,
+                after_features=after_features,
+                progress_before_text=progress_before_text,
+                progress_after_text=current_progress_text,
+                git_head_before=git_head_before,
+                git_head_after=current_head,
+                git_status_before=git_status_before,
+                git_status_after=git_status_after,
+            )
+        ):
+            no_change_decision, confirm_error = self._run_no_change_confirmation(
+                session_dir=session_dir,
+                app_spec=app_spec,
+                feature_index=pending_index,
+                feature=pending_feature,
+                passing=passing,
+                total=total,
+            )
+            if confirm_error is not None:
+                gate = GateResult(
+                    gate_id="no_change_confirmation",
+                    passed=False,
+                    message=confirm_error,
+                    remediation=["write_report", "stop"],
+                )
+                return self._fail_with_gate(
+                    session_id=session_id,
+                    phase=phase,
+                    gate=gate,
+                    session_dir=session_dir,
+                    before_features=before_features,
+                    return_code=run["return_code"],
+                    passing=passing,
+                    total=total,
+                    progress_made=progress_made,
+                )
+
+            if no_change_decision.action == "mark_complete":
+                mark_error = self._mark_feature_complete(pending_index)
+                if mark_error is not None:
+                    gate = GateResult(
+                        gate_id="no_change_confirmation",
+                        passed=False,
+                        message=mark_error,
+                        remediation=["write_report", "stop"],
+                    )
+                    return self._fail_with_gate(
+                        session_id=session_id,
+                        phase=phase,
+                        gate=gate,
+                        session_dir=session_dir,
+                        before_features=before_features,
+                        return_code=run["return_code"],
+                        passing=passing,
+                        total=total,
+                        progress_made=progress_made,
+                    )
+                after_features = load_feature_list(self.feature_file)
+                passing, total = progress_counts(after_features)
+                progress_made = passing > previous_passing
+            else:
+                progress_made = False
 
         clean_check = self._verify_git_clean_if_enabled(session_dir)
         if clean_check is not None:
@@ -322,8 +431,7 @@ class Harness:
                 progress_made=progress_made,
             )
 
-        if self.config.commit_required:
-            current_head = self._current_git_head()
+        if self.config.commit_required and no_change_decision is None:
             if current_head is None:
                 gate = GateResult(
                     gate_id="commit_required",
@@ -361,9 +469,8 @@ class Harness:
                     progress_made=progress_made,
                 )
 
-        if self.config.progress_update_required:
-            current_progress_text = self.progress_file.read_text() if self.progress_file.exists() else ""
-            if progress_before_text is not None and current_progress_text == progress_before_text:
+        if self.config.progress_update_required and no_change_decision is None:
+            if current_progress_text == progress_before_text:
                 gate = GateResult(
                     gate_id="progress_update_required",
                     passed=False,
@@ -382,11 +489,23 @@ class Harness:
                     progress_made=progress_made,
                 )
 
+        completion_notes: list[str] = []
+        if no_change_decision is not None:
+            completion_notes.append(
+                f"no-change confirmation: {no_change_decision.action}; reason: {no_change_decision.reason}"
+            )
+        if readonly_retry_recovered:
+            completion_notes.append("recovered from read-only sandbox via workspace-write retry")
+
+        message = "Session completed"
+        if completion_notes:
+            message = f"Session completed ({'; '.join(completion_notes)})"
+
         result = SessionResult(
             session_id=session_id,
             phase=phase,
             success=True,
-            message="Session completed",
+            message=message,
             passing=passing,
             total=total,
             progress_made=progress_made,
@@ -396,7 +515,11 @@ class Harness:
         self._append_progress(result)
         return result
 
-    def run_loop(self, max_sessions: int | None = None) -> list[SessionResult]:
+    def run_loop(
+        self,
+        max_sessions: int | None = None,
+        continue_on_failure: bool = False,
+    ) -> list[SessionResult]:
         """Run repeated sessions until completion, failure, or loop policy stop."""
         self.bootstrap()
         self.last_loop_stop_reason = None
@@ -426,6 +549,9 @@ class Harness:
                 session_count += 1
 
                 if not result.success:
+                    if continue_on_failure:
+                        time.sleep(max(self.config.auto_continue_delay_seconds, 0))
+                        continue
                     break
 
                 if result.total > 0 and result.passing == result.total:
@@ -604,7 +730,13 @@ class Harness:
 
         log_path.write_text("".join(lines))
 
-    def _run_agent_command(self, phase: str, prompt_file: Path, session_dir: Path) -> dict[str, Any]:
+    def _run_agent_command(
+        self,
+        phase: str,
+        prompt_file: Path,
+        session_dir: Path,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         run_result = self.backend.run(
             AgentRunRequest(
                 phase=phase,
@@ -614,6 +746,7 @@ class Harness:
                 timeout_seconds=self.config.agent_timeout_seconds,
                 backend_model=self.config.backend_model,
                 model_reasoning_effort=self.config.model_reasoning_effort,
+                metadata=metadata or {},
             )
         )
         return {
@@ -622,6 +755,228 @@ class Harness:
             "stdout_path": run_result.stdout_path,
             "stderr_path": run_result.stderr_path,
         }
+
+    def _retry_if_readonly_sandbox_failure(
+        self,
+        phase: str,
+        prompt_file: Path,
+        session_dir: Path,
+        failed_run: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self.config.backend_name != "codex_cli":
+            return None
+        if phase not in {"initializer", "coding"}:
+            return None
+        if not self._is_readonly_sandbox_error(
+            stderr_path=failed_run["stderr_path"],
+            stdout_path=failed_run["stdout_path"],
+        ):
+            return None
+
+        retry_dir = session_dir / "retry-workspace-write"
+        retry_dir.mkdir(parents=True, exist_ok=True)
+        return self._run_agent_command(
+            phase=phase,
+            prompt_file=prompt_file,
+            session_dir=retry_dir,
+            metadata={"force_workspace_write": True, "retry_reason": "readonly_sandbox"},
+        )
+
+    @staticmethod
+    def _is_readonly_sandbox_error(stderr_path: Path, stdout_path: Path) -> bool:
+        chunks: list[str] = []
+        for path in (stderr_path, stdout_path):
+            try:
+                chunks.append(path.read_text())
+            except Exception:
+                continue
+        text = "\n".join(chunks).lower()
+        markers = (
+            "read-only",
+            "read only",
+            "sandbox: read-only",
+            "workspace is read-only",
+            "readonly sandbox",
+            "只读",
+        )
+        return any(marker in text for marker in markers)
+
+    def _session_has_no_observable_changes(
+        self,
+        before_features: list[dict[str, Any]],
+        after_features: list[dict[str, Any]],
+        progress_before_text: str,
+        progress_after_text: str,
+        git_head_before: str | None,
+        git_head_after: str | None,
+        git_status_before: str | None,
+        git_status_after: str | None,
+    ) -> bool:
+        if git_status_before is not None and git_status_after is not None:
+            return git_head_before == git_head_after and git_status_before == git_status_after
+
+        return before_features == after_features and progress_before_text == progress_after_text
+
+    def _run_no_change_confirmation(
+        self,
+        session_dir: Path,
+        app_spec: str,
+        feature_index: int,
+        feature: dict[str, Any] | None,
+        passing: int,
+        total: int,
+    ) -> tuple[NoChangeDecision | None, str | None]:
+        confirm_dir = session_dir / "no-change-confirmation"
+        confirm_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = confirm_dir / "prompt.md"
+        prompt_file.write_text(
+            self._build_no_change_confirmation_prompt(
+                app_spec=app_spec,
+                feature_index=feature_index,
+                feature=feature or {},
+                passing=passing,
+                total=total,
+            )
+        )
+
+        run = self._run_agent_command("repair", prompt_file, confirm_dir)
+        if run["timeout"]:
+            return (
+                None,
+                "no-change confirmation timed out "
+                f"(logs: {self._display_path(run['stdout_path'])}, "
+                f"{self._display_path(run['stderr_path'])})",
+            )
+        if run["return_code"] != 0:
+            stderr_tail = self._last_non_empty_log_line(run["stderr_path"])
+            suffix = f"; last stderr: {stderr_tail}" if stderr_tail else ""
+            return (
+                None,
+                "no-change confirmation returned non-zero exit status "
+                f"(logs: {self._display_path(run['stdout_path'])}, "
+                f"{self._display_path(run['stderr_path'])}){suffix}",
+            )
+
+        decision, parse_error = self._parse_no_change_decision(
+            stdout_path=run["stdout_path"],
+            stderr_path=run["stderr_path"],
+        )
+        if parse_error is not None:
+            return None, parse_error
+
+        return decision, None
+
+    def _build_no_change_confirmation_prompt(
+        self,
+        app_spec: str,
+        feature_index: int,
+        feature: dict[str, Any],
+        passing: int,
+        total: int,
+    ) -> str:
+        steps = feature.get("steps", [])
+        rendered_steps = "\n".join(f"- {step}" for step in steps if isinstance(step, str))
+        if not rendered_steps:
+            rendered_steps = "- (no explicit steps provided)"
+
+        return (
+            "## ROLE: NO-CHANGE CONFIRMATION\n\n"
+            "The previous coding session made no repository changes. "
+            "You must decide whether to continue coding or mark the current feature complete.\n\n"
+            f"- Current progress: {passing}/{total}\n"
+            f"- Target feature index: {feature_index}\n"
+            f"- Category: {feature.get('category', 'functional')}\n"
+            f"- Description: {feature.get('description', '')}\n"
+            "- Steps:\n"
+            f"{rendered_steps}\n\n"
+            "### Decision rules\n"
+            '- Return `"continue"` if more implementation or verification is still needed.\n'
+            '- Return `"mark_complete"` only if the target feature is already satisfied.\n\n'
+            "### Output contract (strict)\n"
+            "Print exactly one JSON object on a single line and nothing else:\n"
+            '{"decision":"continue|mark_complete","reason":"short explanation"}\n\n'
+            "### App spec reminder\n"
+            f"{app_spec}\n"
+        )
+
+    def _parse_no_change_decision(
+        self,
+        stdout_path: Path,
+        stderr_path: Path,
+    ) -> tuple[NoChangeDecision | None, str | None]:
+        try:
+            lines = stdout_path.read_text().splitlines()
+        except Exception:
+            lines = []
+
+        for line in reversed(lines):
+            text = line.strip()
+            if not (text.startswith("{") and text.endswith("}")):
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+            decision_raw = str(payload.get("decision", "")).strip().lower()
+            reason = str(payload.get("reason", "")).strip()
+            if decision_raw not in {"continue", "mark_complete"}:
+                continue
+
+            action: Literal["continue", "mark_complete"]
+            if decision_raw == "continue":
+                action = "continue"
+            else:
+                action = "mark_complete"
+
+            return (
+                NoChangeDecision(
+                    action=action,
+                    reason=reason or "no reason provided",
+                    log_path=stdout_path,
+                ),
+                None,
+            )
+
+        stderr_tail = self._last_non_empty_log_line(stderr_path)
+        suffix = f"; last stderr: {stderr_tail}" if stderr_tail else ""
+        return (
+            None,
+            "no-change confirmation did not return a valid JSON decision "
+            f"(logs: {self._display_path(stdout_path)}, {self._display_path(stderr_path)}){suffix}",
+        )
+
+    def _mark_feature_complete(self, feature_index: int) -> str | None:
+        try:
+            features = load_feature_list(self.feature_file)
+        except Exception as exc:
+            return f"cannot load feature_list.json for mark_complete: {exc}"
+
+        if feature_index < 0 or feature_index >= len(features):
+            return f"feature index out of range for mark_complete: {feature_index}"
+
+        feature = features[feature_index]
+        if bool(feature.get("passes", False)):
+            return None
+
+        feature["passes"] = True
+        self.feature_file.write_text(json.dumps(features, ensure_ascii=False, indent=2) + "\n")
+        return None
+
+    def _git_status_porcelain(self) -> str | None:
+        git_dir = self.project_dir / ".git"
+        if not git_dir.exists():
+            return None
+
+        completed = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=self.project_dir,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            return None
+        return completed.stdout
 
     def _display_path(self, path: Path) -> str:
         try:

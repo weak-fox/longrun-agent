@@ -11,6 +11,7 @@ def test_parser_accepts_backend_and_profile_overrides() -> None:
             "run-loop",
             "--max-sessions",
             "3",
+            "--continue-on-failure",
             "--backend",
             "claude_sdk",
             "--profile",
@@ -22,6 +23,7 @@ def test_parser_accepts_backend_and_profile_overrides() -> None:
 
     assert args.command == "run-loop"
     assert args.max_sessions == 3
+    assert args.continue_on_failure is True
     assert args.backend == "claude_sdk"
     assert args.profile == "article"
     assert args.model_reasoning_effort == "xhigh"
@@ -91,8 +93,9 @@ def test_run_loop_applies_runtime_overrides(tmp_path: Path, monkeypatch) -> None
             captured["config"] = config
             self.last_loop_stop_reason = None
 
-        def run_loop(self, max_sessions: int | None = None):
+        def run_loop(self, max_sessions: int | None = None, continue_on_failure: bool = False):
             captured["max_sessions"] = max_sessions
+            captured["continue_on_failure"] = continue_on_failure
             return [
                 SessionResult(
                     session_id=1,
@@ -112,6 +115,7 @@ def test_run_loop_applies_runtime_overrides(tmp_path: Path, monkeypatch) -> None
     code = run_loop(
         Path("longrun-agent.toml"),
         max_sessions=4,
+        continue_on_failure=True,
         backend="claude_sdk",
         profile="article",
         backend_model="claude-opus-x",
@@ -119,12 +123,33 @@ def test_run_loop_applies_runtime_overrides(tmp_path: Path, monkeypatch) -> None
     )
     assert code == 0
     assert captured["max_sessions"] == 4
+    assert captured["continue_on_failure"] is True
     config = captured["config"]
     assert isinstance(config, HarnessConfig)
     assert config.backend_name == "claude_sdk"
     assert config.profile == "article"
     assert config.backend_model == "claude-opus-x"
     assert config.model_reasoning_effort == "xhigh"
+
+
+def test_run_loop_requires_max_sessions_when_continue_on_failure_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("longrun_agent.cli.load_config", lambda _path: HarnessConfig(
+        project_dir=tmp_path,
+        agent_command=["echo", "ok"],
+        verification_commands=[],
+        bearings_commands=[],
+        auto_continue_delay_seconds=0,
+    ))
+
+    code = run_loop(
+        Path("longrun-agent.toml"),
+        max_sessions=None,
+        continue_on_failure=True,
+    )
+
+    assert code == 2
 
 
 def test_run_one_session_updates_codex_command_model_on_override(tmp_path: Path, monkeypatch) -> None:
