@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longrun-agent"
+version = "0.1.0"
+description = "Harness for long-running coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+article = ["claude-code-sdk"]
+
+[project.scripts]
+longrun-agent = "longrun_agent.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"longrun_agent.article" = ["prompts/*.md", "prompts/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

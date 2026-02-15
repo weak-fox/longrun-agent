@@ -1,0 +1,36 @@
+[agent]
+# Legacy fallback command. Prefer [backends.codex_cli].
+command = ["bash", "-lc", "LONGRUN_PHASE=\"{phase}\" codex exec --skip-git-repo-check --full-auto -m \"{backend_model}\" -C \"{project_dir}\" < \"{prompt_file}\""]
+timeout_seconds = 600
+
+[runtime]
+backend = "codex_cli"
+profile = "default"
+backend_model = "gpt-5.3-codex"
+model_reasoning_effort = "xhigh"
+
+[backends.codex_cli]
+# Placeholders: {project_dir} {session_dir} {prompt_file} {phase} {backend_model}
+command = ["bash", "-lc", "LONGRUN_PHASE=\"{phase}\" codex exec --skip-git-repo-check --full-auto -m \"{backend_model}\" -C \"{project_dir}\" < \"{prompt_file}\""]
+model = "gpt-5.3-codex"
+timeout_seconds = 600
+
+[backends.claude_sdk]
+model = "claude-sonnet-4-5-20250929"
+
+[gates]
+commit_required = false
+progress_update_required = false
+repair_on_verification_failure = false
+
+[harness]
+project_dir = "/Users/cog/project/long-run-agent"
+state_dir = ""
+auto_continue_delay_seconds = 3
+feature_target = 40
+max_no_progress_sessions = 5
+max_features_per_session = 1
+require_clean_git = false
+bearings_commands = ["pwd", "ls -la", "cat app_spec.txt", "head -n 80 feature_list.json || true", "tail -n 80 claude-progress.txt || true", "git log --oneline -20 || true"]
+pre_coding_commands = []
+verification_commands = []

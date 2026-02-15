@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv-*/
+.venv/
+venv/
+env/
+
+# Packaging/build
+build/
+dist/
+*.egg-info/
+
+# Local environment files
+.env
+.env.*
+
+# longrun-agent runtime artifacts
+.longrun/
+app_spec.txt
+claude-progress.txt
+feature_list.json
+init.sh
+
+# local planning/checklist notes
+docs/plans/
+docs/*checklist*
+task_plan.md
+findings.md
+progress.md
