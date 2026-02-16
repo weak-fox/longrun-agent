@@ -8,11 +8,13 @@ from longrun_agent.gates.checks import (
 
 
 def test_required_artifacts_initializer_gate_fails_when_artifacts_missing(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / ".longrun" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     features = [
         {"category": "functional", "description": "A", "steps": ["s1"], "passes": False},
         {"category": "functional", "description": "B", "steps": ["s1"], "passes": False},
     ]
-    (tmp_path / "feature_list.json").write_text(json.dumps(features, indent=2))
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
     # init.sh and claude-progress.txt intentionally missing
 
     result = check_required_artifacts_initializer(project_dir=tmp_path, feature_target=2)
@@ -43,4 +45,3 @@ def test_feature_list_coding_invariants_gate_detects_immutable_mutation(tmp_path
     assert result.passed is False
     assert result.gate_id == "feature_immutable_fields"
     assert "rollback_feature_list" in result.remediation
-

@@ -23,6 +23,7 @@ from .config import (
     LEGACY_AGENT_PLACEHOLDER_COMMAND,
     LEGACY_CODEX_PLACEHOLDER_COMMAND,
     load_config,
+    resolve_artifacts_dir,
     save_config,
     write_default_config,
 )
@@ -305,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--artifacts-dir",
         type=Path,
         default=None,
-        help="Set generated artifact directory (defaults to project_dir when unset)",
+        help="Set generated artifact directory (defaults to <resolved state_dir>/artifacts when unset)",
     )
     configure.add_argument(
         "--codex-command",
@@ -368,11 +369,7 @@ def _split_csv_values(raw: str) -> list[str]:
 
 
 def _resolve_artifacts_dir(config) -> Path:
-    if config.artifacts_dir is None:
-        return config.project_dir
-    if config.artifacts_dir.is_absolute():
-        return config.artifacts_dir.resolve()
-    return (config.project_dir / config.artifacts_dir).resolve()
+    return resolve_artifacts_dir(config.project_dir, config.state_dir, config.artifacts_dir)
 
 
 def _render_guided_app_spec(
@@ -1400,7 +1397,7 @@ def run_configure(
         state_dir = Path(_prompt_text("State dir", state_default))
         artifacts_default = config.artifacts_dir.as_posix() if config.artifacts_dir is not None else ""
         artifacts_raw = _prompt_text(
-            "Artifacts dir (relative to project_dir; blank means project root)",
+            "Artifacts dir (relative to project_dir; blank means <state_dir>/artifacts)",
             artifacts_default,
         )
         artifacts_dir = Path(artifacts_raw) if artifacts_raw.strip() else None
@@ -1458,7 +1455,7 @@ def run_configure(
     print(f"model_reasoning_effort={config.model_reasoning_effort or '(unset)'}")
     print(f"project_dir={config.project_dir}")
     print(f"state_dir={config.state_dir or '(default: <project_dir>/.longrun)'}")
-    print(f"artifacts_dir={config.artifacts_dir or '(default: <project_dir>)'}")
+    print(f"artifacts_dir={config.artifacts_dir or '(default: <state_dir>/artifacts)'}")
     print(f"codex_command={shlex.join(config.agent_command)}")
     return 0
 

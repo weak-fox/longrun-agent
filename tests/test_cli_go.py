@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 from longrun_agent.cli import _resolve_config_path, _run_goal_setup_for_go, build_parser, run_go
 from longrun_agent.config import HarnessConfig, load_config
+from longrun_agent.runtime.contracts import AgentRunResult
 
 
 def test_parser_accepts_go_command_arguments() -> None:
@@ -268,3 +270,118 @@ def test_goal_setup_writes_app_spec_into_artifacts_dir_when_configured(
 
     assert (tmp_path / ".longrun" / "artifacts" / "app_spec.txt").exists()
     assert not (tmp_path / "app_spec.txt").exists()
+
+
+def test_run_go_generates_stack_aware_incremental_spec_for_existing_codebase(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    project_dir = tmp_path / "existing-web"
+    (project_dir / "src").mkdir(parents=True)
+    (project_dir / "src" / "App.tsx").write_text("export const App = () => <main>Existing app</main>;\n")
+    (project_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "existing-web",
+                "private": True,
+                "dependencies": {"react": "^18.3.0"},
+                "devDependencies": {"typescript": "^5.6.0"},
+            },
+            indent=2,
+        )
+    )
+
+    monkeypatch.setattr(
+        "longrun_agent.cli._validate_project_python_environment",
+        lambda _project_dir, _allow_any_python: None,
+    )
+    monkeypatch.setattr("longrun_agent.cli.run_loop", lambda *_args, **_kwargs: 0)
+
+    class _StackAwareBackend:
+        name = "fake-stack-aware"
+
+        def run(self, request):
+            request.session_dir.mkdir(parents=True, exist_ok=True)
+            stdout = request.session_dir / "agent.stdout.log"
+            stderr = request.session_dir / "agent.stderr.log"
+
+            prompt_text = request.prompt_file.read_text()
+            assert (
+                "fits the existing repository instead of inventing a greenfield rewrite."
+                in prompt_text
+            )
+            assert (
+                "Prefer incremental improvements over technology migration unless the goal explicitly asks for migration."
+                in prompt_text
+            )
+
+            package = json.loads((request.project_dir / "package.json").read_text())
+            deps = package.get("dependencies", {})
+            dev_deps = package.get("devDependencies", {})
+            uses_react = isinstance(deps, dict) and "react" in deps
+            uses_typescript = (
+                isinstance(dev_deps, dict)
+                and "typescript" in dev_deps
+                or isinstance(deps, dict)
+                and "typescript" in deps
+            )
+            stack = "React + TypeScript" if uses_react and uses_typescript else "existing stack"
+
+            payload = {
+                "primary_users": "Existing product users",
+                "core_flows": [
+                    "Filter existing records",
+                    "Batch update selected records",
+                    "Persist filters in URL",
+                    "Keep existing navigation intact",
+                ],
+                "constraints": [
+                    f"Keep existing {stack} stack",
+                    "Prefer incremental changes over rewrites",
+                ],
+                "done_criteria": "New flow works on top of current app and existing checks stay green",
+                "feature_target": 24,
+                "assumptions": ["Extend current modules instead of building from scratch"],
+            }
+            stdout.write_text(json.dumps(payload, ensure_ascii=False))
+            stderr.write_text("")
+            return AgentRunResult(
+                backend=self.name,
+                return_code=0,
+                timeout=False,
+                stdout_path=stdout,
+                stderr_path=stderr,
+                metadata={},
+            )
+
+    monkeypatch.setattr(
+        "longrun_agent.cli.create_backend",
+        lambda **_kwargs: _StackAwareBackend(),
+    )
+
+    code = run_go(
+        config_path=config_path,
+        goal="在现有项目基础上新增筛选和批量操作",
+        max_sessions=1,
+        project_dir=project_dir,
+        feature_target=24,
+        brainstorm_rounds=0,
+        skip_brainstorm=True,
+        non_interactive=True,
+        yes=True,
+        allow_any_python=True,
+    )
+
+    assert code == 0
+    spec_path = project_dir / ".longrun" / "artifacts" / "app_spec.txt"
+    assert spec_path.exists()
+    spec_text = spec_path.read_text()
+    assert "Keep existing React + TypeScript stack" in spec_text
+    assert "Prefer incremental changes over rewrites" in spec_text
+    assert not (project_dir / "app_spec.txt").exists()
+
+    draft_prompt = project_dir / ".longrun" / "guided-goal" / "goal-draft.prompt.md"
+    assert draft_prompt.exists()
+    prompt_text = draft_prompt.read_text()
+    assert "Layered repository reading (MANDATORY)" in prompt_text
+    assert "Read `AGENTS.md` first" in prompt_text

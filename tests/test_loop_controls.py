@@ -9,26 +9,29 @@ from longrun_agent.harness import Harness, HarnessConfig
 def _write_agent_script(path: Path, mode: str) -> Path:
     script = path / "fake_agent_loop.py"
     source = """import json
+import os
 import sys
 from pathlib import Path
 
 project_dir = Path(sys.argv[1])
 phase = sys.argv[2]
+artifact_dir = Path(os.environ.get("LONGRUN_ARTIFACTS_DIR", project_dir / ".longrun" / "artifacts"))
+artifact_dir.mkdir(parents=True, exist_ok=True)
 
 if phase == "initializer":
     features = [
         {"category": "functional", "description": "Feature A", "steps": ["step 1"], "passes": False},
         {"category": "functional", "description": "Feature B", "steps": ["step 1"], "passes": False},
     ]
-    (project_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
-    (project_dir / "init.sh").write_text("#!/usr/bin/env bash\\necho init\\n")
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
+    (artifact_dir / "init.sh").write_text("#!/usr/bin/env bash\\necho init\\n")
     raise SystemExit(0)
 
 if phase == "repair":
     print('{"decision":"continue","reason":"still pending"}')
     raise SystemExit(0)
 
-features_path = project_dir / "feature_list.json"
+features_path = artifact_dir / "feature_list.json"
 features = json.loads(features_path.read_text())
 
 if "__MODE__" == "progress":
@@ -67,7 +70,9 @@ features_path.write_text(json.dumps(features, indent=2))
 
 
 def test_run_session_blocks_when_active_lock_exists(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = tmp_path / ".longrun" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     lock_dir = tmp_path / ".longrun"
     lock_dir.mkdir(parents=True, exist_ok=True)
     (lock_dir / "lock.json").write_text(
@@ -93,7 +98,9 @@ def test_run_session_blocks_when_active_lock_exists(tmp_path: Path) -> None:
 
 
 def test_run_session_replaces_stale_lock(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = tmp_path / ".longrun" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     lock_dir = tmp_path / ".longrun"
     lock_dir.mkdir(parents=True, exist_ok=True)
     (lock_dir / "lock.json").write_text(
@@ -119,7 +126,9 @@ def test_run_session_replaces_stale_lock(tmp_path: Path) -> None:
 
 
 def test_run_loop_stops_after_consecutive_no_progress_sessions(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = tmp_path / ".longrun" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     script = _write_agent_script(tmp_path, mode="stuck")
 
     harness = Harness(
@@ -145,7 +154,9 @@ def test_run_loop_stops_after_consecutive_no_progress_sessions(tmp_path: Path) -
 
 
 def test_run_loop_can_continue_after_failed_session_when_enabled(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = tmp_path / ".longrun" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     script = _write_agent_script(tmp_path, mode="fail-once-hard-then-progress")
 
     harness = Harness(
@@ -168,7 +179,9 @@ def test_run_loop_can_continue_after_failed_session_when_enabled(tmp_path: Path)
 
 
 def test_status_summary_returns_progress_and_session_info(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = tmp_path / ".longrun" / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     script = _write_agent_script(tmp_path, mode="progress")
 
     harness = Harness(

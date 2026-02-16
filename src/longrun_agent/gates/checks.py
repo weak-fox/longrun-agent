@@ -21,7 +21,7 @@ def check_required_artifacts_initializer(
 ) -> GateResult:
     """Require initializer artifacts before proceeding."""
     missing: list[str] = []
-    artifact_root = artifacts_dir or project_dir
+    artifact_root = artifacts_dir or (project_dir / ".longrun" / "artifacts")
     feature_file = artifact_root / "feature_list.json"
     init_script = artifact_root / "init.sh"
     progress_file = artifact_root / "claude-progress.txt"

@@ -11,10 +11,10 @@ def build_initializer_prompt(
     app_spec: str,
     feature_target: int,
     *,
-    app_spec_path: str = "app_spec.txt",
-    feature_list_path: str = "feature_list.json",
-    progress_path: str = "claude-progress.txt",
-    init_script_path: str = "init.sh",
+    app_spec_path: str = ".longrun/artifacts/app_spec.txt",
+    feature_list_path: str = ".longrun/artifacts/feature_list.json",
+    progress_path: str = ".longrun/artifacts/claude-progress.txt",
+    init_script_path: str = ".longrun/artifacts/init.sh",
 ) -> str:
     """Create the initializer-session prompt."""
     return dedent(
@@ -56,9 +56,9 @@ def build_coding_prompt(
     passing: int,
     total: int,
     *,
-    app_spec_path: str = "app_spec.txt",
-    feature_list_path: str = "feature_list.json",
-    progress_path: str = "claude-progress.txt",
+    app_spec_path: str = ".longrun/artifacts/app_spec.txt",
+    feature_list_path: str = ".longrun/artifacts/feature_list.json",
+    progress_path: str = ".longrun/artifacts/claude-progress.txt",
 ) -> str:
     """Create the coding-session prompt."""
     steps = "\n".join(f"- {step}" for step in feature.get("steps", []))

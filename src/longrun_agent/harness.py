@@ -13,7 +13,7 @@ import time
 from typing import Any, Literal
 
 from .backends.factory import create_backend
-from .config import HarnessConfig
+from .config import HarnessConfig, resolve_artifacts_dir, resolve_state_dir
 from .feature_list import (
     first_pending_feature,
     load_feature_list,
@@ -61,20 +61,12 @@ class Harness:
     def __init__(self, config: HarnessConfig):
         self.config = config
         self.project_dir = config.project_dir.resolve()
-        if config.state_dir is None:
-            state_dir = self.project_dir / ".longrun"
-        elif config.state_dir.is_absolute():
-            state_dir = config.state_dir
-        else:
-            state_dir = self.project_dir / config.state_dir
-        if config.artifacts_dir is None:
-            artifacts_dir = self.project_dir
-        elif config.artifacts_dir.is_absolute():
-            artifacts_dir = config.artifacts_dir
-        else:
-            artifacts_dir = self.project_dir / config.artifacts_dir
-        self.state_dir = state_dir.resolve()
-        self.artifacts_dir = artifacts_dir.resolve()
+        self.state_dir = resolve_state_dir(self.project_dir, config.state_dir)
+        self.artifacts_dir = resolve_artifacts_dir(
+            self.project_dir,
+            config.state_dir,
+            config.artifacts_dir,
+        )
         self.sessions_dir = self.state_dir / "sessions"
         self.lock_file = self.state_dir / "lock.json"
         self.feature_file = self.artifacts_dir / "feature_list.json"
@@ -731,15 +723,7 @@ class Harness:
         log_path = session_dir / "bearings.log"
         lines: list[str] = []
         env = os.environ.copy()
-        env.update(
-            {
-                "LONGRUN_ARTIFACTS_DIR": self._display_path(self.artifacts_dir),
-                "LONGRUN_APP_SPEC_PATH": self._display_path(self.spec_file),
-                "LONGRUN_FEATURE_LIST_PATH": self._display_path(self.feature_file),
-                "LONGRUN_PROGRESS_PATH": self._display_path(self.progress_file),
-                "LONGRUN_INIT_SCRIPT_PATH": self._display_path(self.init_file),
-            }
-        )
+        env.update(self._runtime_env())
 
         for command in self.config.bearings_commands:
             completed = subprocess.run(
@@ -765,6 +749,22 @@ class Harness:
         session_dir: Path,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        base_metadata: dict[str, Any] = {
+            "artifacts_dir": str(self.artifacts_dir),
+            "state_dir": str(self.state_dir),
+            "app_spec_path": str(self.spec_file),
+            "feature_list_path": str(self.feature_file),
+            "progress_path": str(self.progress_file),
+            "init_script_path": str(self.init_file),
+            "env": self._runtime_env(),
+        }
+        request_metadata = dict(base_metadata)
+        if metadata is not None:
+            if isinstance(metadata.get("env"), dict):
+                merged_env = dict(base_metadata["env"])
+                merged_env.update({str(k): str(v) for k, v in metadata["env"].items()})
+                request_metadata["env"] = merged_env
+            request_metadata.update({k: v for k, v in metadata.items() if k != "env"})
         run_result = self.backend.run(
             AgentRunRequest(
                 phase=phase,
@@ -774,7 +774,7 @@ class Harness:
                 timeout_seconds=self.config.agent_timeout_seconds,
                 backend_model=self.config.backend_model,
                 model_reasoning_effort=self.config.model_reasoning_effort,
-                metadata=metadata or {},
+                metadata=request_metadata,
             )
         )
         return {
@@ -782,6 +782,16 @@ class Harness:
             "return_code": run_result.return_code,
             "stdout_path": run_result.stdout_path,
             "stderr_path": run_result.stderr_path,
+        }
+
+    def _runtime_env(self) -> dict[str, str]:
+        return {
+            "LONGRUN_STATE_DIR": self._display_path(self.state_dir),
+            "LONGRUN_ARTIFACTS_DIR": self._display_path(self.artifacts_dir),
+            "LONGRUN_APP_SPEC_PATH": self._display_path(self.spec_file),
+            "LONGRUN_FEATURE_LIST_PATH": self._display_path(self.feature_file),
+            "LONGRUN_PROGRESS_PATH": self._display_path(self.progress_file),
+            "LONGRUN_INIT_SCRIPT_PATH": self._display_path(self.init_file),
         }
 
     def _retry_if_readonly_sandbox_failure(

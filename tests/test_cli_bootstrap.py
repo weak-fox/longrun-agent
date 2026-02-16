@@ -9,6 +9,10 @@ from longrun_agent.cli import (
 from longrun_agent.config import DEFAULT_CODEX_MODEL, load_config
 
 
+def _spec_path(project_dir: Path) -> Path:
+    return project_dir / ".longrun" / "artifacts" / "app_spec.txt"
+
+
 def test_parser_accepts_bootstrap_guided_flag() -> None:
     parser = build_parser()
     args = parser.parse_args(["bootstrap", "--guided"])
@@ -39,7 +43,7 @@ def test_run_bootstrap_guided_updates_app_spec_and_feature_target(tmp_path: Path
     code = run_bootstrap(config_path, project_dir, guided=True)
     assert code == 0
 
-    spec_text = (project_dir / "app_spec.txt").read_text()
+    spec_text = _spec_path(project_dir).read_text()
     assert "Build a lightweight task board" in spec_text
     assert "- Create task" in spec_text
     assert "- No paid services" in spec_text
@@ -116,7 +120,7 @@ def test_run_bootstrap_guided_falls_back_to_manual_when_agent_draft_fails(
 
     code = run_bootstrap(config_path, project_dir, guided=True)
     assert code == 0
-    spec_text = (project_dir / "app_spec.txt").read_text()
+    spec_text = _spec_path(project_dir).read_text()
     assert "Build local todo app" in spec_text
     assert "Small teams" in spec_text
     assert "- create task" in spec_text
@@ -178,6 +182,6 @@ def test_run_bootstrap_guided_keeps_previous_draft_when_regeneration_fails(
 
     code = run_bootstrap(config_path, project_dir, guided=True)
     assert code == 0
-    spec_text = (project_dir / "app_spec.txt").read_text()
+    spec_text = _spec_path(project_dir).read_text()
     assert "Build kanban app" in spec_text
     assert "Main workflow works" in spec_text

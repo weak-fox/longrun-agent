@@ -68,6 +68,11 @@ expect_file_contains() {
   expect_contains "$content" "$needle" "$label"
 }
 
+artifact_dir_for_state() {
+  local state_dir="$1"
+  printf '%s/artifacts' "$state_dir"
+}
+
 require_tools() {
   [[ -x "$LR_BIN" ]] || fail "longrun-agent binary not found/executable: $LR_BIN"
   [[ -x "$PY_BIN" ]] || fail "python binary not found/executable: $PY_BIN"
@@ -78,6 +83,7 @@ make_agent() {
   local project="$1"
   cat >"$project/fake_agent.py" <<'PYCODE'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -86,9 +92,65 @@ phase = sys.argv[2]
 mode = sys.argv[3] if len(sys.argv) > 3 else "pass_one"
 backend_model = sys.argv[4] if len(sys.argv) > 4 else ""
 reasoning = sys.argv[5] if len(sys.argv) > 5 else ""
+prompt_file = Path(sys.argv[6]) if len(sys.argv) > 6 else None
+session_dir = Path(sys.argv[7]) if len(sys.argv) > 7 else None
+artifact_dir = Path(os.environ.get("LONGRUN_ARTIFACTS_DIR", project_dir / ".longrun" / "artifacts"))
+artifact_dir.mkdir(parents=True, exist_ok=True)
 
 with (project_dir / "agent_args.log").open("a") as handle:
-    handle.write(f"phase={phase} mode={mode} model={backend_model} reasoning={reasoning}\n")
+    prompt_name = prompt_file.name if prompt_file is not None else ""
+    session_name = session_dir.name if session_dir is not None else ""
+    handle.write(
+        f"phase={phase} mode={mode} model={backend_model} reasoning={reasoning} "
+        f"prompt={prompt_name} session={session_name}\n"
+    )
+
+if (
+    mode == "stack_aware_goal"
+    and phase == "initializer"
+    and prompt_file is not None
+    and prompt_file.name == "goal-draft.prompt.md"
+):
+    stack_label = "existing stack"
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            package_data = json.loads(package_json.read_text())
+        except Exception:
+            package_data = {}
+        deps = package_data.get("dependencies", {})
+        dev_deps = package_data.get("devDependencies", {})
+        uses_react = isinstance(deps, dict) and "react" in deps
+        uses_typescript = (
+            isinstance(dev_deps, dict)
+            and "typescript" in dev_deps
+            or isinstance(deps, dict)
+            and "typescript" in deps
+        )
+        if uses_react and uses_typescript:
+            stack_label = "React + TypeScript"
+        elif uses_react:
+            stack_label = "React"
+        elif uses_typescript:
+            stack_label = "TypeScript"
+    payload = {
+        "primary_users": "Existing product users",
+        "core_flows": [
+            "Filter current records by status",
+            "Batch update selected records",
+            "Persist filter state in URL",
+            "Keep existing pages and navigation intact",
+        ],
+        "constraints": [
+            f"Keep existing {stack_label} stack",
+            "Prefer incremental changes over rewrites",
+        ],
+        "done_criteria": "New flow works on top of the existing app and existing checks stay green",
+        "feature_target": 24,
+        "assumptions": ["Extend current modules instead of creating a greenfield app"],
+    }
+    print(json.dumps(payload, ensure_ascii=False))
+    raise SystemExit(0)
 
 if phase == "initializer":
     feature_count_file = project_dir / "feature_count.txt"
@@ -102,11 +164,11 @@ if phase == "initializer":
         }
         for index in range(feature_count)
     ]
-    (project_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
     if mode != "initializer_missing_artifacts":
-        (project_dir / "init.sh").write_text("#!/usr/bin/env bash\necho init\n")
-    if not (project_dir / "claude-progress.txt").exists():
-        (project_dir / "claude-progress.txt").write_text("# Agent Session Progress\n\n")
+        (artifact_dir / "init.sh").write_text("#!/usr/bin/env bash\necho init\n")
+    if not (artifact_dir / "claude-progress.txt").exists():
+        (artifact_dir / "claude-progress.txt").write_text("# Agent Session Progress\n\n")
     raise SystemExit(0)
 
 if phase == "repair":
@@ -117,7 +179,7 @@ if phase == "repair":
         print('{"decision":"continue","reason":"feature still pending"}')
     raise SystemExit(0)
 
-features_path = project_dir / "feature_list.json"
+features_path = artifact_dir / "feature_list.json"
 features = json.loads(features_path.read_text())
 
 if mode in {"pass_one", "touch_progress", "dirty_git", "no_commit", "verify_fail", "args_capture", "precheck_fail"}:
@@ -143,7 +205,7 @@ elif mode == "repair":
             break
 
 if mode == "touch_progress":
-    progress = project_dir / "claude-progress.txt"
+    progress = artifact_dir / "claude-progress.txt"
     before = progress.read_text() if progress.exists() else ""
     progress.write_text(before + "agent touched progress\n")
 
@@ -178,7 +240,7 @@ write_config() {
 
   cat >"$cfg" <<EOF
 [agent]
-command = ["$PY_BIN", "$project/fake_agent.py", "{project_dir}", "{phase}", "$mode", "{backend_model}", "{model_reasoning_effort}"]
+command = ["$PY_BIN", "$project/fake_agent.py", "{project_dir}", "{phase}", "$mode", "{backend_model}", "{model_reasoning_effort}", "{prompt_file}", "{session_dir}"]
 timeout_seconds = $timeout_secs
 
 [runtime]
@@ -188,7 +250,7 @@ backend_model = "$model"
 model_reasoning_effort = "$reasoning"
 
 [backends.codex_cli]
-command = ["$PY_BIN", "$project/fake_agent.py", "{project_dir}", "{phase}", "$mode", "{backend_model}", "{model_reasoning_effort}"]
+command = ["$PY_BIN", "$project/fake_agent.py", "{project_dir}", "{phase}", "$mode", "{backend_model}", "{model_reasoning_effort}", "{prompt_file}", "{session_dir}"]
 model = "$model"
 timeout_seconds = $timeout_secs
 
@@ -272,12 +334,16 @@ PYCODE
 verify_run_session_status_and_state_dir() {
   local project="$WORK_ROOT/project-run-success"
   local cfg="$WORK_ROOT/run-success.toml"
+  local state="$WORK_ROOT/state-run-success"
+  local artifacts
+  artifacts="$(artifact_dir_for_state "$state")"
   mkdir -p "$project"
   make_agent "$project"
-  printf 'Build app\n' >"$project/app_spec.txt"
+  mkdir -p "$artifacts"
+  printf 'Build app\n' >"$artifacts/app_spec.txt"
   printf '3\n' >"$project/feature_count.txt"
 
-  write_config "$cfg" "$project" "$WORK_ROOT/state-run-success" "pass_one" false false false false 3 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$cfg" "$project" "$state" "pass_one" false false false false 3 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
 
   local first second status_text status_json
   first=$("$LR_BIN" --config "$cfg" run-session)
@@ -285,11 +351,11 @@ verify_run_session_status_and_state_dir() {
   expect_contains "$first" "phase=initializer success=True" "run-session initializer"
   expect_contains "$second" "phase=coding success=True" "run-session coding"
 
-  [[ -d "$WORK_ROOT/state-run-success/sessions/session-0001" ]] || fail "state_dir session missing"
+  [[ -d "$state/sessions/session-0001" ]] || fail "state_dir session missing"
   [[ ! -d "$project/.longrun" ]] || fail "project .longrun should not exist when state_dir is configured"
-  expect_file_contains "$WORK_ROOT/state-run-success/sessions/session-0001/prompt.md" "Layered repository reading (MANDATORY)" "initializer layered reading guidance"
-  expect_file_contains "$WORK_ROOT/state-run-success/sessions/session-0001/prompt.md" 'Read `AGENTS.md` first' "initializer codex instruction file guidance"
-  expect_file_contains "$WORK_ROOT/state-run-success/sessions/session-0002/prompt.md" "Do not read the entire repository by default." "coding layered reading guidance"
+  expect_file_contains "$state/sessions/session-0001/prompt.md" "Layered repository reading (MANDATORY)" "initializer layered reading guidance"
+  expect_file_contains "$state/sessions/session-0001/prompt.md" 'Read `AGENTS.md` first' "initializer codex instruction file guidance"
+  expect_file_contains "$state/sessions/session-0002/prompt.md" "Do not read the entire repository by default." "coding layered reading guidance"
 
   status_text=$("$LR_BIN" --config "$cfg" status)
   expect_contains "$status_text" "project-run-success" "status text project"
@@ -303,15 +369,19 @@ verify_gates_and_limits() {
   # progress_update_required
   local p3="$WORK_ROOT/project-progress-gate"
   local c3="$WORK_ROOT/progress-gate.toml"
+  local s3="$WORK_ROOT/state-progress-gate"
+  local a3
+  a3="$(artifact_dir_for_state "$s3")"
   mkdir -p "$p3"
   make_agent "$p3"
-  printf 'Build app\n' >"$p3/app_spec.txt"
-  cat >"$p3/feature_list.json" <<'EOF'
+  mkdir -p "$a3"
+  printf 'Build app\n' >"$a3/app_spec.txt"
+  cat >"$a3/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c3" "$p3" "$WORK_ROOT/state-progress-gate" "pass_one" false true false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c3" "$p3" "$s3" "pass_one" false true false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out3
   out3=$("$LR_BIN" --config "$c3" run-session 2>&1)
@@ -324,8 +394,18 @@ EOF
   # commit_required
   local p4="$WORK_ROOT/project-commit-gate"
   local c4="$WORK_ROOT/commit-gate.toml"
+  local s4="$WORK_ROOT/state-commit-gate"
+  local a4
+  a4="$(artifact_dir_for_state "$s4")"
   mkdir -p "$p4"
   make_agent "$p4"
+  mkdir -p "$a4"
+  printf 'Build app\n' >"$a4/app_spec.txt"
+  cat >"$a4/feature_list.json" <<'EOF'
+[
+  {"category":"functional","description":"A","steps":["s1"],"passes":false}
+]
+EOF
   printf 'Build app\n' >"$p4/app_spec.txt"
   cat >"$p4/feature_list.json" <<'EOF'
 [
@@ -340,7 +420,7 @@ EOF
     git add app_spec.txt feature_list.json
     git commit -qm "init"
   )
-  write_config "$c4" "$p4" "$WORK_ROOT/state-commit-gate" "no_commit" true false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c4" "$p4" "$s4" "no_commit" true false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out4
   out4=$("$LR_BIN" --config "$c4" run-session 2>&1)
@@ -353,15 +433,19 @@ EOF
   # repair_on_verification_failure
   local p5="$WORK_ROOT/project-repair"
   local c5="$WORK_ROOT/repair.toml"
+  local s5="$WORK_ROOT/state-repair"
+  local a5
+  a5="$(artifact_dir_for_state "$s5")"
   mkdir -p "$p5"
   make_agent "$p5"
-  printf 'Build app\n' >"$p5/app_spec.txt"
-  cat >"$p5/feature_list.json" <<'EOF'
+  mkdir -p "$a5"
+  printf 'Build app\n' >"$a5/app_spec.txt"
+  cat >"$a5/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c5" "$p5" "$WORK_ROOT/state-repair" "repair" false false true false 1 5 1 "[]" '["test -f repaired.ok"]' '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c5" "$p5" "$s5" "repair" false false true false 1 5 1 "[]" '["test -f repaired.ok"]' '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   local out5
   out5=$("$LR_BIN" --config "$c5" run-session)
   expect_contains "$out5" "success=True" "repair success"
@@ -371,8 +455,18 @@ EOF
   # require_clean_git
   local p6="$WORK_ROOT/project-clean-git"
   local c6="$WORK_ROOT/clean-git.toml"
+  local s6="$WORK_ROOT/state-clean-git"
+  local a6
+  a6="$(artifact_dir_for_state "$s6")"
   mkdir -p "$p6"
   make_agent "$p6"
+  mkdir -p "$a6"
+  printf 'Build app\n' >"$a6/app_spec.txt"
+  cat >"$a6/feature_list.json" <<'EOF'
+[
+  {"category":"functional","description":"A","steps":["s1"],"passes":false}
+]
+EOF
   printf 'Build app\n' >"$p6/app_spec.txt"
   cat >"$p6/feature_list.json" <<'EOF'
 [
@@ -387,7 +481,7 @@ EOF
     git add app_spec.txt feature_list.json
     git commit -qm "init"
   )
-  write_config "$c6" "$p6" "$WORK_ROOT/state-clean-git" "dirty_git" false false false true 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c6" "$p6" "$s6" "dirty_git" false false false true 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out6
   out6=$("$LR_BIN" --config "$c6" run-session 2>&1)
@@ -400,17 +494,21 @@ EOF
   # max_features_per_session
   local p7="$WORK_ROOT/project-max-features"
   local c7="$WORK_ROOT/max-features.toml"
+  local s7="$WORK_ROOT/state-max-features"
+  local a7
+  a7="$(artifact_dir_for_state "$s7")"
   mkdir -p "$p7"
   make_agent "$p7"
-  printf 'Build app\n' >"$p7/app_spec.txt"
-  cat >"$p7/feature_list.json" <<'EOF'
+  mkdir -p "$a7"
+  printf 'Build app\n' >"$a7/app_spec.txt"
+  cat >"$a7/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false},
   {"category":"functional","description":"B","steps":["s1"],"passes":false},
   {"category":"functional","description":"C","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c7" "$p7" "$WORK_ROOT/state-max-features" "pass_two" false false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c7" "$p7" "$s7" "pass_two" false false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out7
   out7=$("$LR_BIN" --config "$c7" run-session 2>&1)
@@ -423,11 +521,15 @@ EOF
   # max_no_progress_sessions in run-loop
   local p8="$WORK_ROOT/project-no-progress-loop"
   local c8="$WORK_ROOT/no-progress-loop.toml"
+  local s8="$WORK_ROOT/state-no-progress-loop"
+  local a8
+  a8="$(artifact_dir_for_state "$s8")"
   mkdir -p "$p8"
   make_agent "$p8"
-  printf 'Build app\n' >"$p8/app_spec.txt"
+  mkdir -p "$a8"
+  printf 'Build app\n' >"$a8/app_spec.txt"
   printf '2\n' >"$p8/feature_count.txt"
-  write_config "$c8" "$p8" "$WORK_ROOT/state-no-progress-loop" "stuck" false false false false 2 2 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c8" "$p8" "$s8" "stuck" false false false false 2 2 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out8
   out8=$("$LR_BIN" --config "$c8" run-loop --max-sessions 8 2>&1)
@@ -440,15 +542,19 @@ EOF
   # pre_coding_commands
   local p9="$WORK_ROOT/project-pre-coding"
   local c9="$WORK_ROOT/pre-coding.toml"
+  local s9="$WORK_ROOT/state-pre-coding"
+  local a9
+  a9="$(artifact_dir_for_state "$s9")"
   mkdir -p "$p9"
   make_agent "$p9"
-  printf 'Build app\n' >"$p9/app_spec.txt"
-  cat >"$p9/feature_list.json" <<'EOF'
+  mkdir -p "$a9"
+  printf 'Build app\n' >"$a9/app_spec.txt"
+  cat >"$a9/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c9" "$p9" "$WORK_ROOT/state-pre-coding" "precheck_fail" false false false false 1 5 1 '["exit 1"]' "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c9" "$p9" "$s9" "precheck_fail" false false false false 1 5 1 '["exit 1"]' "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out9
   out9=$("$LR_BIN" --config "$c9" run-session 2>&1)
@@ -461,15 +567,19 @@ EOF
   # verification_commands (without repair)
   local p10="$WORK_ROOT/project-verification"
   local c10="$WORK_ROOT/verification.toml"
+  local s10="$WORK_ROOT/state-verification"
+  local a10
+  a10="$(artifact_dir_for_state "$s10")"
   mkdir -p "$p10"
   make_agent "$p10"
-  printf 'Build app\n' >"$p10/app_spec.txt"
-  cat >"$p10/feature_list.json" <<'EOF'
+  mkdir -p "$a10"
+  printf 'Build app\n' >"$a10/app_spec.txt"
+  cat >"$a10/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c10" "$p10" "$WORK_ROOT/state-verification" "verify_fail" false false false false 1 5 1 "[]" '["exit 1"]' '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c10" "$p10" "$s10" "verify_fail" false false false false 1 5 1 "[]" '["exit 1"]' '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   set +e
   local out10
   out10=$("$LR_BIN" --config "$c10" run-session 2>&1)
@@ -484,15 +594,19 @@ verify_runtime_overrides_and_go() {
   # run-session model/reasoning overrides
   local p11="$WORK_ROOT/project-args-capture"
   local c11="$WORK_ROOT/args-capture.toml"
+  local s11="$WORK_ROOT/state-args-capture"
+  local a11
+  a11="$(artifact_dir_for_state "$s11")"
   mkdir -p "$p11"
   make_agent "$p11"
-  printf 'Build app\n' >"$p11/app_spec.txt"
-  cat >"$p11/feature_list.json" <<'EOF'
+  mkdir -p "$a11"
+  printf 'Build app\n' >"$a11/app_spec.txt"
+  cat >"$a11/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c11" "$p11" "$WORK_ROOT/state-args-capture" "args_capture" false false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "old-model" "" 120
+  write_config "$c11" "$p11" "$s11" "args_capture" false false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "old-model" "" 120
   local out11
   out11=$("$LR_BIN" --config "$c11" run-session --backend-model new-model --model-reasoning-effort xhigh)
   expect_contains "$out11" "success=True" "run-session override success"
@@ -505,18 +619,22 @@ EOF
   # go command (non-interactive)
   local p12="$WORK_ROOT/project-go"
   local c12="$WORK_ROOT/go.toml"
+  local s12="$WORK_ROOT/state-go"
+  local a12
+  a12="$(artifact_dir_for_state "$s12")"
   mkdir -p "$p12"
   make_agent "$p12"
-  write_config "$c12" "$p12" "$WORK_ROOT/state-go" "pass_one" false false false false 3 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  mkdir -p "$a12"
+  write_config "$c12" "$p12" "$s12" "pass_one" false false false false 3 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   local out12
   out12=$("$LR_BIN" --config "$c12" go \
     --goal "做一个给小团队 用的任务看板" \
     --non-interactive --skip-brainstorm --yes --allow-any-python \
     --max-sessions 2 --feature-target 3)
   expect_contains "$out12" "Updated app spec:" "go updates app_spec"
-  expect_contains "$out12" "session=0001 phase=coding success=True" "go first session"
+  expect_contains "$out12" "session=0001 phase=initializer success=True" "go first session"
   expect_contains "$out12" "session=0002 phase=coding success=True" "go second session"
-  expect_contains "$(cat "$p12/app_spec.txt")" "## Product Goal" "go app_spec generated"
+  expect_contains "$(cat "$a12/app_spec.txt")" "## Product Goal" "go app_spec generated"
   expect_file_contains "$p12/.longrun/guided-goal/goal-draft.prompt.md" "Layered repository reading (MANDATORY)" "go draft layered guidance"
   expect_file_contains "$p12/.longrun/guided-goal/goal-draft.prompt.md" 'Read `AGENTS.md` first' "go draft codex instruction file guidance"
   ok "go command behavior"
@@ -559,15 +677,19 @@ verify_run_loop_and_external_config_path() {
   # run-loop clean success
   local p13="$WORK_ROOT/project-loop-success"
   local c13="$WORK_ROOT/loop-success.toml"
+  local s13="$WORK_ROOT/state-loop-success"
+  local a13
+  a13="$(artifact_dir_for_state "$s13")"
   mkdir -p "$p13"
   make_agent "$p13"
-  printf 'Build app\n' >"$p13/app_spec.txt"
-  cat >"$p13/feature_list.json" <<'EOF'
+  mkdir -p "$a13"
+  printf 'Build app\n' >"$a13/app_spec.txt"
+  cat >"$a13/feature_list.json" <<'EOF'
 [
   {"category":"functional","description":"A","steps":["s1"],"passes":false}
 ]
 EOF
-  write_config "$c13" "$p13" "$WORK_ROOT/state-loop-success" "pass_one" false false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+  write_config "$c13" "$p13" "$s13" "pass_one" false false false false 1 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
   local out13
   out13=$("$LR_BIN" --config "$c13" run-loop --max-sessions 5)
   expect_contains "$out13" "All features passing. Loop stopped cleanly." "run-loop clean stop"
@@ -590,6 +712,52 @@ EOF
   ok "external default config path separation"
 }
 
+verify_existing_codebase_task_generation() {
+  log "verify go task generation stays based on existing codebase"
+  local p15="$WORK_ROOT/project-existing-codebase"
+  local c15="$WORK_ROOT/existing-codebase.toml"
+  local s15="$WORK_ROOT/state-existing-codebase"
+  local a15
+  a15="$(artifact_dir_for_state "$s15")"
+  mkdir -p "$p15/src" "$a15"
+  make_agent "$p15"
+
+  cat >"$p15/package.json" <<'EOF'
+{
+  "name": "existing-web-app",
+  "private": true,
+  "dependencies": {
+    "react": "^18.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
+EOF
+  cat >"$p15/src/App.tsx" <<'EOF'
+export function App() {
+  return <main>Existing app shell</main>;
+}
+EOF
+
+  write_config "$c15" "$p15" "$s15" "stack_aware_goal" false false false false 3 5 1 "[]" "[]" '["echo bearings-ok"]' "default" "gpt-5.2-codex" "" 120
+
+  local out15
+  out15=$("$LR_BIN" --config "$c15" go \
+    --goal "在现有项目基础上新增筛选和批量操作" \
+    --non-interactive --skip-brainstorm --yes --allow-any-python \
+    --max-sessions 1 --feature-target 3)
+
+  expect_contains "$out15" "Updated app spec:" "existing-codebase go updated spec"
+  expect_contains "$out15" "session=0001 phase=initializer success=True" "existing-codebase go initializer run"
+  expect_file_contains "$p15/.longrun/guided-goal/goal-draft.prompt.md" "fits the existing repository instead of inventing a greenfield rewrite." "existing-codebase prompt keeps existing repo guidance"
+  expect_file_contains "$p15/.longrun/guided-goal/goal-draft.prompt.md" "Prefer incremental improvements over technology migration unless the goal explicitly asks for migration." "existing-codebase prompt incremental migration rule"
+  expect_file_contains "$a15/app_spec.txt" "Keep existing React + TypeScript stack" "existing-codebase generated spec references current stack"
+  expect_file_contains "$a15/app_spec.txt" "Prefer incremental changes over rewrites" "existing-codebase generated spec avoids rewrite"
+  [[ ! -f "$p15/app_spec.txt" ]] || fail "existing-codebase spec should live in artifacts dir, not project root"
+  ok "existing codebase task generation stays incremental"
+}
+
 main() {
   require_tools
   log "work root: $WORK_ROOT"
@@ -600,6 +768,7 @@ main() {
   verify_runtime_overrides_and_go
   verify_layered_reading_output_for_claude_profile
   verify_run_loop_and_external_config_path
+  verify_existing_codebase_task_generation
   ok "CLI/config verification matrix passed"
 }
 

@@ -37,9 +37,9 @@ LEGACY_CODEX_PLACEHOLDER_COMMAND = ["echo", "configure codex_cli command in long
 DEFAULT_BEARINGS_COMMANDS = [
     "pwd",
     "ls -la",
-    'cat "${LONGRUN_APP_SPEC_PATH:-app_spec.txt}"',
-    'head -n 80 "${LONGRUN_FEATURE_LIST_PATH:-feature_list.json}" || true',
-    'tail -n 80 "${LONGRUN_PROGRESS_PATH:-claude-progress.txt}" || true',
+    'cat "${LONGRUN_APP_SPEC_PATH:-.longrun/artifacts/app_spec.txt}"',
+    'head -n 80 "${LONGRUN_FEATURE_LIST_PATH:-.longrun/artifacts/feature_list.json}" || true',
+    'tail -n 80 "${LONGRUN_PROGRESS_PATH:-.longrun/artifacts/claude-progress.txt}" || true',
     "git log --oneline -20 || true",
 ]
 
@@ -82,14 +82,39 @@ require_clean_git = false
 bearings_commands = [
   "pwd",
   "ls -la",
-  "cat app_spec.txt",
-  "head -n 80 feature_list.json || true",
-  "tail -n 80 claude-progress.txt || true",
+  'cat "${{LONGRUN_APP_SPEC_PATH:-.longrun/artifacts/app_spec.txt}}"',
+  'head -n 80 "${{LONGRUN_FEATURE_LIST_PATH:-.longrun/artifacts/feature_list.json}}" || true',
+  'tail -n 80 "${{LONGRUN_PROGRESS_PATH:-.longrun/artifacts/claude-progress.txt}}" || true',
   "git log --oneline -20 || true",
 ]
 pre_coding_commands = []
 verification_commands = []
 """
+
+
+def resolve_state_dir(project_dir: Path, state_dir: Path | None) -> Path:
+    """Resolve effective state directory from project + optional config override."""
+    if state_dir is None:
+        return (project_dir / ".longrun").resolve()
+    if state_dir.is_absolute():
+        return state_dir.resolve()
+    return (project_dir / state_dir).resolve()
+
+
+def resolve_artifacts_dir(
+    project_dir: Path,
+    state_dir: Path | None,
+    artifacts_dir: Path | None,
+) -> Path:
+    """Resolve effective artifacts directory.
+
+    Default location follows the resolved state dir (`<state_dir>/artifacts`).
+    """
+    if artifacts_dir is None:
+        return (resolve_state_dir(project_dir, state_dir) / "artifacts").resolve()
+    if artifacts_dir.is_absolute():
+        return artifacts_dir.resolve()
+    return (project_dir / artifacts_dir).resolve()
 
 
 def _is_legacy_codex_command_with_removed_flags(command: list[str]) -> bool:

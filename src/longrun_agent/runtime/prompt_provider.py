@@ -18,10 +18,10 @@ class PromptProvider:
         profile: str = "default",
         backend_name: str = "codex_cli",
         *,
-        app_spec_path: str = "app_spec.txt",
-        feature_list_path: str = "feature_list.json",
-        progress_path: str = "claude-progress.txt",
-        init_script_path: str = "init.sh",
+        app_spec_path: str = ".longrun/artifacts/app_spec.txt",
+        feature_list_path: str = ".longrun/artifacts/feature_list.json",
+        progress_path: str = ".longrun/artifacts/claude-progress.txt",
+        init_script_path: str = ".longrun/artifacts/init.sh",
     ):
         self.profile = profile
         if profile not in {"default", "article"}:

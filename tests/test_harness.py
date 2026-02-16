@@ -9,11 +9,14 @@ from longrun_agent.harness import Harness, HarnessConfig
 def _write_agent_script(path: Path, mode: str) -> Path:
     script = path / "fake_agent.py"
     source = """import json
+import os
 import sys
 from pathlib import Path
 
 project_dir = Path(sys.argv[1])
 phase = sys.argv[2]
+artifact_dir = Path(os.environ.get("LONGRUN_ARTIFACTS_DIR", project_dir / ".longrun" / "artifacts"))
+artifact_dir.mkdir(parents=True, exist_ok=True)
 
 if phase == \"initializer\":
     if \"__MODE__\" == \"fail_initializer\":
@@ -23,12 +26,12 @@ if phase == \"initializer\":
         {\"category\": \"functional\", \"description\": \"Feature A\", \"steps\": [\"step 1\"], \"passes\": False},
         {\"category\": \"functional\", \"description\": \"Feature B\", \"steps\": [\"step 1\"], \"passes\": False},
     ]
-    (project_dir / \"feature_list.json\").write_text(json.dumps(features, indent=2))
-    (project_dir / \"init.sh\").write_text(\"#!/usr/bin/env bash\\necho init\\n\")
-    (project_dir / \"claude-progress.txt\").write_text(\"initialized\\n\")
+    (artifact_dir / \"feature_list.json\").write_text(json.dumps(features, indent=2))
+    (artifact_dir / \"init.sh\").write_text(\"#!/usr/bin/env bash\\necho init\\n\")
+    (artifact_dir / \"claude-progress.txt\").write_text(\"initialized\\n\")
     raise SystemExit(0)
 
-features_path = project_dir / \"feature_list.json\"
+features_path = artifact_dir / \"feature_list.json\"
 features = json.loads(features_path.read_text())
 
 if \"__MODE__\" == \"good\":
@@ -46,8 +49,14 @@ features_path.write_text(json.dumps(features, indent=2))
     return script
 
 
+def _artifact_dir(project_dir: Path) -> Path:
+    return project_dir / ".longrun" / "artifacts"
+
+
 def test_run_session_initializer_then_coding(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = _artifact_dir(tmp_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     script = _write_agent_script(tmp_path, mode="good")
 
     harness = Harness(
@@ -69,12 +78,14 @@ def test_run_session_initializer_then_coding(tmp_path: Path) -> None:
     assert second.success is True
     assert second.phase == "coding"
 
-    features = json.loads((tmp_path / "feature_list.json").read_text())
+    features = json.loads((artifact_dir / "feature_list.json").read_text())
     assert features[0]["passes"] is True
 
 
 def test_run_session_non_zero_exit_reports_code_and_log_paths(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = _artifact_dir(tmp_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     script = _write_agent_script(tmp_path, mode="fail_initializer")
 
     harness = Harness(
@@ -97,7 +108,9 @@ def test_run_session_non_zero_exit_reports_code_and_log_paths(tmp_path: Path) ->
 
 
 def test_run_session_reverts_illegal_feature_list_mutation(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = _artifact_dir(tmp_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
 
     features = [
         {
@@ -107,7 +120,7 @@ def test_run_session_reverts_illegal_feature_list_mutation(tmp_path: Path) -> No
             "passes": False,
         }
     ]
-    (tmp_path / "feature_list.json").write_text(json.dumps(features, indent=2))
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
 
     script = _write_agent_script(tmp_path, mode="mutate")
 
@@ -124,13 +137,15 @@ def test_run_session_reverts_illegal_feature_list_mutation(tmp_path: Path) -> No
     result = harness.run_session()
 
     assert result.success is False
-    restored = json.loads((tmp_path / "feature_list.json").read_text())
+    restored = json.loads((artifact_dir / "feature_list.json").read_text())
     assert restored[0]["description"] == "Feature A"
     assert "forbidden feature_list mutation" in result.message.lower()
 
 
 def test_run_session_short_circuits_when_all_features_pass(tmp_path: Path) -> None:
-    (tmp_path / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = _artifact_dir(tmp_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     features = [
         {
             "category": "functional",
@@ -139,7 +154,7 @@ def test_run_session_short_circuits_when_all_features_pass(tmp_path: Path) -> No
             "passes": True,
         }
     ]
-    (tmp_path / "feature_list.json").write_text(json.dumps(features, indent=2))
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
 
     harness = Harness(
         HarnessConfig(
@@ -161,7 +176,9 @@ def test_harness_uses_custom_state_dir_when_configured(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)
     state_dir = tmp_path / "state"
-    (project_dir / "app_spec.txt").write_text("Build a basic task app")
+    artifact_dir = state_dir / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
     script = _write_agent_script(project_dir, mode="good")
 
     harness = Harness(

@@ -61,9 +61,9 @@ Codex 沙箱说明：
 ## 核心概念（务必先读）
 
 运行目录中关键文件：
-- `app_spec.txt`：你要构建什么
-- `feature_list.json`：特性/测试清单（只允许更新 `passes`；禁止修改描述、步骤、顺序）
-- `claude-progress.txt`：每轮摘要
+- `.longrun/artifacts/app_spec.txt`：你要构建什么
+- `.longrun/artifacts/feature_list.json`：特性/测试清单（只允许更新 `passes`；禁止修改描述、步骤、顺序）
+- `.longrun/artifacts/claude-progress.txt`：每轮摘要
 - `.longrun/sessions/session-XXXX/`：会话工件目录
 - `.longrun/remediation/session-XXXX.json`：门禁失败修正报告
 
@@ -122,7 +122,7 @@ export ANTHROPIC_API_KEY='your-api-key'
 longrun-agent bootstrap
 ```
 
-如果你想用引导式问答来生成任务目标和 `app_spec.txt`：
+如果你想用引导式问答来生成任务目标和 `app_spec.txt`（默认写到 `.longrun/artifacts/`）：
 
 ```bash
 longrun-agent bootstrap --guided
@@ -137,11 +137,11 @@ longrun-agent bootstrap --guided
 
 会生成/准备：
 - `longrun-agent.toml`
-- `app_spec.txt`
-- `claude-progress.txt`
+- `.longrun/artifacts/app_spec.txt`
+- `.longrun/artifacts/claude-progress.txt`
 - `.longrun/` 状态目录
 
-### 3) 修改 `app_spec.txt`
+### 3) 修改 `.longrun/artifacts/app_spec.txt`
 
 把你的产品目标、主要流程、约束写清楚。
 
@@ -220,7 +220,7 @@ longrun-agent go --goal "做一个给小团队用的任务看板"
 
 默认行为：
 - 使用当前配置的 backend/model（可命令行覆盖）
-- 引导式补全 `app_spec.txt`（支持 agent 反问澄清需求）
+- 引导式补全 `app_spec.txt`（默认写到 `.longrun/artifacts/`，支持 agent 反问澄清需求）
 - 自动跑 `run-loop`（默认 `--max-sessions 20`）
 - 默认要求在项目 `.venv-longrun` 中运行（可用 `--allow-any-python` 跳过，属于高级参数）
 - 首次 `go`（无配置文件）会先进入必填配置向导，再继续执行
@@ -234,7 +234,7 @@ longrun-agent go --goal "做一个给小团队用的任务看板"
 - `commit/progress/repair` 三个 gate 开关
 
 常用参数：
-- `--goal`：产品目标一句话（当 `app_spec.txt` 未有明确目标时建议必传）
+- `--goal`：产品目标一句话（当 `.longrun/artifacts/app_spec.txt` 未有明确目标时建议必传）
 - `--backend` / `--backend-model`
 - `--max-sessions`
 - `--feature-target`
@@ -253,7 +253,7 @@ longrun-agent go --goal "做一个给小团队用的任务看板"
 - `--model-reasoning-effort`：模型推理强度（`codex_cli` 生效）
 - `--project-dir`：设置项目目录
 - `--state-dir`：设置 harness 状态目录（`sessions/lock/remediation`），可与项目目录分离
-- `--artifacts-dir`：设置生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`），默认在 `project_dir` 根目录
+- `--artifacts-dir`：设置生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`），默认在 `<state_dir>/artifacts`
 - `--codex-command`：Codex 命令模板（字符串，内部用 shell 规则切分）
 - `--codex-timeout-seconds`：Codex 命令超时
 - `--commit-required` / `--no-commit-required`
@@ -309,7 +309,7 @@ longrun-agent run-loop --max-sessions 20 --continue-on-failure
 ### `[harness]`
 - `project_dir`：项目目录
 - `state_dir`：harness 状态目录（`sessions/lock/remediation`）；留空时默认 `<project_dir>/.longrun`
-- `artifacts_dir`：业务生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`）；留空时默认 `<project_dir>`
+- `artifacts_dir`：业务生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`）；留空时默认 `<state_dir>/artifacts`
 - `feature_target`：initializer 最少 feature 数（默认 `200`）
 - `max_features_per_session`：单轮最多新增通过 feature 数（默认 `1`）
 - `max_no_progress_sessions`：连续无进展熔断阈值（默认 `5`）

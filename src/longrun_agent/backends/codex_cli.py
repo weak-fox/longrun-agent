@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -27,6 +28,10 @@ class CodexCliBackend(AgentBackend):
         stdout_file = request.session_dir / "agent.stdout.log"
         stderr_file = request.session_dir / "agent.stderr.log"
         command_file.write_text(" ".join(command))
+        env = os.environ.copy()
+        extra_env = request.metadata.get("env")
+        if isinstance(extra_env, dict):
+            env.update({str(key): str(value) for key, value in extra_env.items()})
 
         try:
             completed = subprocess.run(
@@ -35,6 +40,7 @@ class CodexCliBackend(AgentBackend):
                 capture_output=True,
                 text=True,
                 timeout=request.timeout_seconds,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             stdout_text = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
