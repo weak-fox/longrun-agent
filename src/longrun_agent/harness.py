@@ -74,7 +74,10 @@ class Harness:
         self.progress_file = self.project_dir / "claude-progress.txt"
         self.spec_file = self.project_dir / "app_spec.txt"
         self.last_loop_stop_reason: str | None = None
-        self.prompt_provider = PromptProvider(profile=self.config.profile)
+        self.prompt_provider = PromptProvider(
+            profile=self.config.profile,
+            backend_name=self.config.backend_name,
+        )
         self.remediation_engine = RemediationEngine(
             state_dir=self.state_dir,
             feature_file=self.feature_file,

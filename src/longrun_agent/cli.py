@@ -28,6 +28,10 @@ from .config import (
 )
 from .harness import Harness
 from .runtime.contracts import AgentRunRequest
+from .runtime.context_guidance import (
+    build_instruction_and_layered_reading_guidance,
+    instruction_file_for_backend,
+)
 
 BACKEND_CHOICES = ("codex_cli", "claude_sdk")
 PROFILE_CHOICES = ("default", "article")
@@ -480,14 +484,22 @@ def _parse_goal_draft(raw_output: str, goal: str, default_feature_target: int) -
     )
 
 
-def _build_goal_expansion_prompt(goal: str) -> str:
+def _build_goal_expansion_prompt(goal: str, backend_name: str) -> str:
+    instruction_file = instruction_file_for_backend(backend_name)
+    guidance = build_instruction_and_layered_reading_guidance(backend_name)
     return dedent(
         f"""\
         You are a product requirements analyst.
-        Expand this one-sentence product goal into a practical implementation draft.
+        Expand this one-sentence product goal into a practical implementation draft that
+        fits the existing repository instead of inventing a greenfield rewrite.
 
         Product goal:
         {goal}
+
+        Before writing the JSON output, recover repository context:
+        - Read `{instruction_file}` first (if present).
+        - Execute layered reads and ground your output in what already exists.
+        {guidance}
 
         Return ONLY valid JSON (no markdown, no code fences) with this shape:
         {{
@@ -502,19 +514,26 @@ def _build_goal_expansion_prompt(goal: str) -> str:
         Rules:
         - Use the same language as the product goal.
         - core_flows: 4-8 items, concrete and user-visible.
-        - constraints: 2-6 items, realistic for a first version.
+        - constraints: 2-6 items, realistic for a first version and aligned with existing stack.
         - feature_target: integer in [20, 80].
         - Keep assumptions explicit if requirements are ambiguous.
+        - Prefer incremental improvements over technology migration unless the goal explicitly asks for migration.
         """
     ).strip()
 
 
-def _build_goal_question_prompt(goal: str, history: list[tuple[str, str]]) -> str:
+def _build_goal_question_prompt(
+    goal: str,
+    history: list[tuple[str, str]],
+    backend_name: str,
+) -> str:
     history_lines = (
         "\n".join(f"- Q: {question}\n  A: {answer}" for question, answer in history)
         if history
         else "- None"
     )
+    instruction_file = instruction_file_for_backend(backend_name)
+    guidance = build_instruction_and_layered_reading_guidance(backend_name)
     return dedent(
         f"""\
         You are helping refine a software product goal before implementation.
@@ -522,6 +541,11 @@ def _build_goal_question_prompt(goal: str, history: list[tuple[str, str]]) -> st
 
         Product goal:
         {goal}
+
+        Before asking the question:
+        - Read `{instruction_file}` first (if present).
+        - Use layered repository reading to find the biggest ambiguity that affects implementation risk.
+        {guidance}
 
         Existing clarification history:
         {history_lines}
@@ -563,7 +587,13 @@ def _generate_goal_question_with_agent(
     temp_dir = config.project_dir / ".longrun" / "guided-goal"
     temp_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = temp_dir / "goal-question.prompt.md"
-    prompt_file.write_text(_build_goal_question_prompt(goal, history))
+    prompt_file.write_text(
+        _build_goal_question_prompt(
+            goal,
+            history,
+            backend_name=config.backend_name,
+        )
+    )
 
     backend = create_backend(
         backend_name=config.backend_name,
@@ -638,7 +668,12 @@ def _generate_goal_draft_with_agent(config, goal: str) -> GuidedGoalDraft:
     temp_dir = config.project_dir / ".longrun" / "guided-goal"
     temp_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = temp_dir / "goal-draft.prompt.md"
-    prompt_file.write_text(_build_goal_expansion_prompt(goal))
+    prompt_file.write_text(
+        _build_goal_expansion_prompt(
+            goal,
+            backend_name=config.backend_name,
+        )
+    )
 
     backend = create_backend(
         backend_name=config.backend_name,
