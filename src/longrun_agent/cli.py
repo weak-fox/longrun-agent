@@ -302,6 +302,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set harness state directory (defaults to <project_dir>/.longrun when unset)",
     )
     configure.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Set generated artifact directory (defaults to project_dir when unset)",
+    )
+    configure.add_argument(
         "--codex-command",
         type=str,
         default=None,
@@ -359,6 +365,14 @@ def _prompt_int(label: str, current: int) -> int:
 def _split_csv_values(raw: str) -> list[str]:
     values = [item.strip() for item in raw.split(",")]
     return [item for item in values if item]
+
+
+def _resolve_artifacts_dir(config) -> Path:
+    if config.artifacts_dir is None:
+        return config.project_dir
+    if config.artifacts_dir.is_absolute():
+        return config.artifacts_dir.resolve()
+    return (config.project_dir / config.artifacts_dir).resolve()
 
 
 def _render_guided_app_spec(
@@ -790,7 +804,9 @@ def _run_goal_wizard(config) -> None:
         "Initializer feature target (20-80 recommended for first run)",
         draft.feature_target,
     )
-    spec_path = config.project_dir / "app_spec.txt"
+    artifacts_dir = _resolve_artifacts_dir(config)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = artifacts_dir / "app_spec.txt"
     spec_path.write_text(
         _render_guided_app_spec(
             goal=draft.goal,
@@ -877,7 +893,9 @@ def _run_goal_setup_for_go(
     else:
         config.feature_target = draft.feature_target
 
-    spec_path = config.project_dir / "app_spec.txt"
+    artifacts_dir = _resolve_artifacts_dir(config)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = artifacts_dir / "app_spec.txt"
     spec_path.write_text(
         _render_guided_app_spec(
             goal=draft.goal,
@@ -1224,7 +1242,7 @@ def run_go(
 
     Harness(config).bootstrap()
     goal_value = (goal or "").strip()
-    spec_path = config.project_dir / "app_spec.txt"
+    spec_path = _resolve_artifacts_dir(config) / "app_spec.txt"
 
     if not goal_value and interactive and not _has_meaningful_goal_in_spec(spec_path):
         goal_value = _prompt_text(
@@ -1350,6 +1368,7 @@ def run_configure(
     model_reasoning_effort: str | None = None,
     project_dir: Path | None = None,
     state_dir: Path | None = None,
+    artifacts_dir: Path | None = None,
     codex_command: str | None = None,
     codex_timeout_seconds: int | None = None,
     commit_required: bool | None = None,
@@ -1379,6 +1398,12 @@ def run_configure(
             else _default_state_dir_for_project(project_dir.resolve()).as_posix()
         )
         state_dir = Path(_prompt_text("State dir", state_default))
+        artifacts_default = config.artifacts_dir.as_posix() if config.artifacts_dir is not None else ""
+        artifacts_raw = _prompt_text(
+            "Artifacts dir (relative to project_dir; blank means project root)",
+            artifacts_default,
+        )
+        artifacts_dir = Path(artifacts_raw) if artifacts_raw.strip() else None
         commit_required = _prompt_bool("Require commit each session", config.commit_required)
         progress_update_required = _prompt_bool(
             "Require progress update each session",
@@ -1404,6 +1429,8 @@ def run_configure(
         config.project_dir = project_dir
     if state_dir is not None:
         config.state_dir = state_dir
+    if artifacts_dir is not None:
+        config.artifacts_dir = artifacts_dir
     if codex_command is not None:
         config.agent_command = _parse_command_template(codex_command)
     if codex_timeout_seconds is not None:
@@ -1431,6 +1458,7 @@ def run_configure(
     print(f"model_reasoning_effort={config.model_reasoning_effort or '(unset)'}")
     print(f"project_dir={config.project_dir}")
     print(f"state_dir={config.state_dir or '(default: <project_dir>/.longrun)'}")
+    print(f"artifacts_dir={config.artifacts_dir or '(default: <project_dir>)'}")
     print(f"codex_command={shlex.join(config.agent_command)}")
     return 0
 
@@ -1494,6 +1522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_reasoning_effort=args.model_reasoning_effort,
             project_dir=args.project_dir,
             state_dir=args.state_dir,
+            artifacts_dir=args.artifacts_dir,
             codex_command=args.codex_command,
             codex_timeout_seconds=args.codex_timeout_seconds,
             commit_required=args.commit_required,

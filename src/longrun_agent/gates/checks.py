@@ -14,12 +14,17 @@ from longrun_agent.feature_list import (
 from .engine import GateResult, passing_gate
 
 
-def check_required_artifacts_initializer(project_dir: Path, feature_target: int) -> GateResult:
+def check_required_artifacts_initializer(
+    project_dir: Path,
+    feature_target: int,
+    artifacts_dir: Path | None = None,
+) -> GateResult:
     """Require initializer artifacts before proceeding."""
     missing: list[str] = []
-    feature_file = project_dir / "feature_list.json"
-    init_script = project_dir / "init.sh"
-    progress_file = project_dir / "claude-progress.txt"
+    artifact_root = artifacts_dir or project_dir
+    feature_file = artifact_root / "feature_list.json"
+    init_script = artifact_root / "init.sh"
+    progress_file = artifact_root / "claude-progress.txt"
 
     if not feature_file.exists():
         missing.append("feature_list.json")
@@ -118,4 +123,3 @@ def check_feature_list_coding_invariants(
         )
 
     return passing_gate("feature_list_coding_invariants")
-

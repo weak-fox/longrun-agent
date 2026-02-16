@@ -69,3 +69,26 @@ def test_claude_prompt_provider_requires_claude_md_and_layered_reading() -> None
     assert "`claude.md`" in coding
     assert "`AGENTS.md`" in coding
     assert "Layered repository reading" in coding
+
+
+def test_prompt_provider_renders_authoritative_artifact_paths() -> None:
+    provider = PromptProvider(
+        profile="default",
+        backend_name="codex_cli",
+        app_spec_path=".longrun/artifacts/app_spec.txt",
+        feature_list_path=".longrun/artifacts/feature_list.json",
+        progress_path=".longrun/artifacts/claude-progress.txt",
+        init_script_path=".longrun/artifacts/init.sh",
+    )
+    prompt = provider.build_coding_prompt(
+        app_spec="Build app",
+        feature_index=0,
+        feature={"category": "functional", "description": "Do thing", "steps": ["a"], "passes": False},
+        passing=0,
+        total=1,
+    )
+
+    assert ".longrun/artifacts/app_spec.txt" in prompt
+    assert ".longrun/artifacts/feature_list.json" in prompt
+    assert ".longrun/artifacts/claude-progress.txt" in prompt
+    assert ".longrun/artifacts/init.sh" in prompt

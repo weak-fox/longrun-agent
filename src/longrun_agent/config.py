@@ -37,9 +37,9 @@ LEGACY_CODEX_PLACEHOLDER_COMMAND = ["echo", "configure codex_cli command in long
 DEFAULT_BEARINGS_COMMANDS = [
     "pwd",
     "ls -la",
-    "cat app_spec.txt",
-    "head -n 80 feature_list.json || true",
-    "tail -n 80 claude-progress.txt || true",
+    'cat "${LONGRUN_APP_SPEC_PATH:-app_spec.txt}"',
+    'head -n 80 "${LONGRUN_FEATURE_LIST_PATH:-feature_list.json}" || true',
+    'tail -n 80 "${LONGRUN_PROGRESS_PATH:-claude-progress.txt}" || true',
     "git log --oneline -20 || true",
 ]
 
@@ -73,6 +73,7 @@ repair_on_verification_failure = false
 [harness]
 project_dir = "."
 state_dir = ""
+artifacts_dir = ""
 auto_continue_delay_seconds = 3
 feature_target = 200
 max_no_progress_sessions = 5
@@ -111,6 +112,7 @@ class HarnessConfig:
     project_dir: Path
     agent_command: list[str]
     state_dir: Path | None = None
+    artifacts_dir: Path | None = None
     backend_name: str = "codex_cli"
     profile: str = "default"
     backend_model: str = DEFAULT_CODEX_MODEL
@@ -190,6 +192,10 @@ def load_config(path: Path) -> HarnessConfig:
     if not isinstance(state_dir_value, str):
         raise ValueError("harness.state_dir must be a string")
     state_dir = Path(state_dir_value) if state_dir_value.strip() else None
+    artifacts_dir_value = harness_data.get("artifacts_dir", "")
+    if not isinstance(artifacts_dir_value, str):
+        raise ValueError("harness.artifacts_dir must be a string")
+    artifacts_dir = Path(artifacts_dir_value) if artifacts_dir_value.strip() else None
 
     bearings = harness_data.get("bearings_commands", DEFAULT_BEARINGS_COMMANDS)
     pre_coding = harness_data.get("pre_coding_commands", [])
@@ -232,6 +238,7 @@ def load_config(path: Path) -> HarnessConfig:
         project_dir=Path(project_dir_value),
         agent_command=command,
         state_dir=state_dir,
+        artifacts_dir=artifacts_dir,
         backend_name=backend_name,
         profile=str(runtime_data.get("profile", "default")),
         backend_model=backend_model,
@@ -297,6 +304,7 @@ def save_config(path: Path, config: HarnessConfig) -> None:
         "[harness]",
         f"project_dir = {quote(config.project_dir.as_posix())}",
         f"state_dir = {quote(config.state_dir.as_posix() if config.state_dir else '')}",
+        f"artifacts_dir = {quote(config.artifacts_dir.as_posix() if config.artifacts_dir else '')}",
         f"auto_continue_delay_seconds = {int(config.auto_continue_delay_seconds)}",
         f"feature_target = {int(config.feature_target)}",
         f"max_no_progress_sessions = {int(config.max_no_progress_sessions)}",

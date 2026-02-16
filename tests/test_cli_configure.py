@@ -19,6 +19,8 @@ def test_parser_accepts_configure_command_arguments() -> None:
             "xhigh",
             "--state-dir",
             "/tmp/longrun-state",
+            "--artifacts-dir",
+            ".longrun/artifacts",
             "--commit-required",
             "--non-interactive",
         ]
@@ -30,6 +32,7 @@ def test_parser_accepts_configure_command_arguments() -> None:
     assert args.backend_model == "claude-opus-x"
     assert args.model_reasoning_effort == "xhigh"
     assert args.state_dir == Path("/tmp/longrun-state")
+    assert args.artifacts_dir == Path(".longrun/artifacts")
     assert args.commit_required is True
     assert args.non_interactive is True
 
@@ -46,6 +49,7 @@ def test_run_configure_updates_config_file_non_interactive(tmp_path: Path) -> No
         model_reasoning_effort="xhigh",
         project_dir=project_dir,
         state_dir=tmp_path / "state",
+        artifacts_dir=Path(".longrun/artifacts"),
         codex_command="codex exec --phase {phase} --prompt-file {prompt_file}",
         codex_timeout_seconds=1234,
         commit_required=True,
@@ -62,6 +66,7 @@ def test_run_configure_updates_config_file_non_interactive(tmp_path: Path) -> No
     assert loaded.model_reasoning_effort == "xhigh"
     assert loaded.project_dir == project_dir
     assert loaded.state_dir == tmp_path / "state"
+    assert loaded.artifacts_dir == Path(".longrun/artifacts")
     assert loaded.agent_timeout_seconds == 1234
     assert loaded.agent_command[:2] == ["codex", "exec"]
     assert loaded.commit_required is True

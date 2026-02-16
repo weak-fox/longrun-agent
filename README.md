@@ -253,6 +253,7 @@ longrun-agent go --goal "做一个给小团队用的任务看板"
 - `--model-reasoning-effort`：模型推理强度（`codex_cli` 生效）
 - `--project-dir`：设置项目目录
 - `--state-dir`：设置 harness 状态目录（`sessions/lock/remediation`），可与项目目录分离
+- `--artifacts-dir`：设置生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`），默认在 `project_dir` 根目录
 - `--codex-command`：Codex 命令模板（字符串，内部用 shell 规则切分）
 - `--codex-timeout-seconds`：Codex 命令超时
 - `--commit-required` / `--no-commit-required`
@@ -308,6 +309,7 @@ longrun-agent run-loop --max-sessions 20 --continue-on-failure
 ### `[harness]`
 - `project_dir`：项目目录
 - `state_dir`：harness 状态目录（`sessions/lock/remediation`）；留空时默认 `<project_dir>/.longrun`
+- `artifacts_dir`：业务生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`）；留空时默认 `<project_dir>`
 - `feature_target`：initializer 最少 feature 数（默认 `200`）
 - `max_features_per_session`：单轮最多新增通过 feature 数（默认 `1`）
 - `max_no_progress_sessions`：连续无进展熔断阈值（默认 `5`）

@@ -181,3 +181,67 @@ def test_harness_uses_custom_state_dir_when_configured(tmp_path: Path) -> None:
     assert result.success is True
     assert (state_dir / "sessions" / "session-0001").exists()
     assert not (project_dir / ".longrun").exists()
+
+
+def test_harness_can_store_generated_artifacts_under_subdirectory(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+    artifact_dir = project_dir / ".longrun-artifacts"
+    script = project_dir / "fake_agent_artifacts.py"
+    script.write_text(
+        """import json
+import sys
+from pathlib import Path
+
+project_dir = Path(sys.argv[1])
+phase = sys.argv[2]
+artifact_dir = Path(sys.argv[3])
+artifact_dir.mkdir(parents=True, exist_ok=True)
+
+if phase == "initializer":
+    features = [
+        {"category": "functional", "description": "Feature A", "steps": ["step 1"], "passes": False},
+        {"category": "functional", "description": "Feature B", "steps": ["step 1"], "passes": False},
+    ]
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
+    (artifact_dir / "init.sh").write_text("#!/usr/bin/env bash\\necho init\\n")
+    (artifact_dir / "claude-progress.txt").write_text("initialized\\n")
+    raise SystemExit(0)
+
+features_path = artifact_dir / "feature_list.json"
+features = json.loads(features_path.read_text())
+for feature in features:
+    if not feature["passes"]:
+        feature["passes"] = True
+        break
+features_path.write_text(json.dumps(features, indent=2))
+"""
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    harness = Harness(
+        HarnessConfig(
+            project_dir=project_dir,
+            artifacts_dir=Path(".longrun-artifacts"),
+            agent_command=[
+                sys.executable,
+                str(script),
+                "{project_dir}",
+                "{phase}",
+                str(artifact_dir),
+            ],
+            verification_commands=[],
+            bearings_commands=[],
+            feature_target=2,
+            auto_continue_delay_seconds=0,
+        )
+    )
+
+    first = harness.run_session()
+    second = harness.run_session()
+
+    assert first.success is True
+    assert second.success is True
+    assert (artifact_dir / "feature_list.json").exists()
+    assert (artifact_dir / "app_spec.txt").exists()
+    assert not (project_dir / "feature_list.json").exists()

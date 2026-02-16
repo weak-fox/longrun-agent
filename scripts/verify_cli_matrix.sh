@@ -58,6 +58,16 @@ expect_contains() {
   fi
 }
 
+expect_file_contains() {
+  local file="$1"
+  local needle="$2"
+  local label="$3"
+  [[ -f "$file" ]] || fail "$label (missing file: $file)"
+  local content
+  content="$(cat "$file")"
+  expect_contains "$content" "$needle" "$label"
+}
+
 require_tools() {
   [[ -x "$LR_BIN" ]] || fail "longrun-agent binary not found/executable: $LR_BIN"
   [[ -x "$PY_BIN" ]] || fail "python binary not found/executable: $PY_BIN"
@@ -102,6 +112,9 @@ if phase == "initializer":
 if phase == "repair":
     if mode == "repair":
         (project_dir / "repaired.ok").write_text("ok\n")
+    elif mode == "stuck":
+        # no-change confirmation contract requires a strict one-line JSON decision.
+        print('{"decision":"continue","reason":"feature still pending"}')
     raise SystemExit(0)
 
 features_path = project_dir / "feature_list.json"
@@ -274,6 +287,9 @@ verify_run_session_status_and_state_dir() {
 
   [[ -d "$WORK_ROOT/state-run-success/sessions/session-0001" ]] || fail "state_dir session missing"
   [[ ! -d "$project/.longrun" ]] || fail "project .longrun should not exist when state_dir is configured"
+  expect_file_contains "$WORK_ROOT/state-run-success/sessions/session-0001/prompt.md" "Layered repository reading (MANDATORY)" "initializer layered reading guidance"
+  expect_file_contains "$WORK_ROOT/state-run-success/sessions/session-0001/prompt.md" 'Read `AGENTS.md` first' "initializer codex instruction file guidance"
+  expect_file_contains "$WORK_ROOT/state-run-success/sessions/session-0002/prompt.md" "Do not read the entire repository by default." "coding layered reading guidance"
 
   status_text=$("$LR_BIN" --config "$cfg" status)
   expect_contains "$status_text" "project-run-success" "status text project"
@@ -501,7 +517,42 @@ EOF
   expect_contains "$out12" "session=0001 phase=coding success=True" "go first session"
   expect_contains "$out12" "session=0002 phase=coding success=True" "go second session"
   expect_contains "$(cat "$p12/app_spec.txt")" "## Product Goal" "go app_spec generated"
+  expect_file_contains "$p12/.longrun/guided-goal/goal-draft.prompt.md" "Layered repository reading (MANDATORY)" "go draft layered guidance"
+  expect_file_contains "$p12/.longrun/guided-goal/goal-draft.prompt.md" 'Read `AGENTS.md` first' "go draft codex instruction file guidance"
   ok "go command behavior"
+}
+
+verify_layered_reading_output_for_claude_profile() {
+  log "verify layered reading prompt output for claude backend guidance"
+  local output
+  output=$("$PY_BIN" - <<'PYCODE'
+from longrun_agent.cli import _build_goal_expansion_prompt, _build_goal_question_prompt
+from longrun_agent.runtime.prompt_provider import PromptProvider
+
+goal_prompt = _build_goal_expansion_prompt("Build app", backend_name="claude_sdk")
+question_prompt = _build_goal_question_prompt("Build app", history=[], backend_name="claude_sdk")
+provider = PromptProvider(profile="default", backend_name="claude_sdk")
+coding_prompt = provider.build_coding_prompt(
+    app_spec="Build app",
+    feature_index=0,
+    feature={"category": "functional", "description": "Do thing", "steps": ["a"], "passes": False},
+    passing=0,
+    total=1,
+)
+
+print("===goal===")
+print(goal_prompt)
+print("===question===")
+print(question_prompt)
+print("===coding===")
+print(coding_prompt)
+PYCODE
+)
+  expect_contains "$output" 'Read `claude.md` first' "claude guidance file selected"
+  expect_contains "$output" 'treat `AGENTS.md` as inactive guidance' "claude inactive alternate file"
+  expect_contains "$output" "Layered repository reading (MANDATORY)" "claude layered reading section"
+  expect_contains "$output" "Do not read the entire repository by default." "claude non-full-read rule"
+  ok "claude layered reading prompt output"
 }
 
 verify_run_loop_and_external_config_path() {
@@ -547,6 +598,7 @@ main() {
   verify_run_session_status_and_state_dir
   verify_gates_and_limits
   verify_runtime_overrides_and_go
+  verify_layered_reading_output_for_claude_profile
   verify_run_loop_and_external_config_path
   ok "CLI/config verification matrix passed"
 }

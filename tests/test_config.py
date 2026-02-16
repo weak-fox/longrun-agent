@@ -94,6 +94,24 @@ state_dir = "/tmp/longrun-state"
     assert config.state_dir == Path("/tmp/longrun-state")
 
 
+def test_load_config_reads_harness_artifacts_dir(tmp_path: Path) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    config_path.write_text(
+        """[agent]
+command = ["echo", "ok"]
+
+[harness]
+project_dir = "."
+artifacts_dir = ".longrun/artifacts"
+"""
+    )
+
+    config = load_config(config_path)
+
+    assert config.project_dir == Path(".")
+    assert config.artifacts_dir == Path(".longrun/artifacts")
+
+
 def test_load_config_uses_claude_model_when_runtime_backend_model_missing(tmp_path: Path) -> None:
     config_path = tmp_path / "longrun-agent.toml"
     config_path.write_text(
@@ -248,6 +266,7 @@ def test_save_config_roundtrip_preserves_core_runtime_fields(tmp_path: Path) -> 
         model_reasoning_effort="xhigh",
         agent_timeout_seconds=123,
         state_dir=tmp_path / "state",
+        artifacts_dir=Path(".longrun/artifacts"),
         commit_required=True,
         progress_update_required=True,
         repair_on_verification_failure=True,
@@ -264,6 +283,7 @@ def test_save_config_roundtrip_preserves_core_runtime_fields(tmp_path: Path) -> 
     assert loaded.model_reasoning_effort == "xhigh"
     assert loaded.agent_timeout_seconds == 123
     assert loaded.state_dir == tmp_path / "state"
+    assert loaded.artifacts_dir == Path(".longrun/artifacts")
     assert loaded.agent_command == ["codex", "exec", "--phase", "{phase}"]
     assert loaded.commit_required is True
     assert loaded.progress_update_required is True

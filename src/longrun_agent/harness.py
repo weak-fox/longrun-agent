@@ -67,16 +67,28 @@ class Harness:
             state_dir = config.state_dir
         else:
             state_dir = self.project_dir / config.state_dir
+        if config.artifacts_dir is None:
+            artifacts_dir = self.project_dir
+        elif config.artifacts_dir.is_absolute():
+            artifacts_dir = config.artifacts_dir
+        else:
+            artifacts_dir = self.project_dir / config.artifacts_dir
         self.state_dir = state_dir.resolve()
+        self.artifacts_dir = artifacts_dir.resolve()
         self.sessions_dir = self.state_dir / "sessions"
         self.lock_file = self.state_dir / "lock.json"
-        self.feature_file = self.project_dir / "feature_list.json"
-        self.progress_file = self.project_dir / "claude-progress.txt"
-        self.spec_file = self.project_dir / "app_spec.txt"
+        self.feature_file = self.artifacts_dir / "feature_list.json"
+        self.progress_file = self.artifacts_dir / "claude-progress.txt"
+        self.spec_file = self.artifacts_dir / "app_spec.txt"
+        self.init_file = self.artifacts_dir / "init.sh"
         self.last_loop_stop_reason: str | None = None
         self.prompt_provider = PromptProvider(
             profile=self.config.profile,
             backend_name=self.config.backend_name,
+            app_spec_path=self._display_path(self.spec_file),
+            feature_list_path=self._display_path(self.feature_file),
+            progress_path=self._display_path(self.progress_file),
+            init_script_path=self._display_path(self.init_file),
         )
         self.remediation_engine = RemediationEngine(
             state_dir=self.state_dir,
@@ -92,6 +104,7 @@ class Harness:
     def bootstrap(self) -> None:
         """Create baseline files and directories needed by the harness."""
         self.project_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.spec_file.exists():
@@ -279,6 +292,7 @@ class Harness:
             gate = check_required_artifacts_initializer(
                 project_dir=self.project_dir,
                 feature_target=self.config.feature_target,
+                artifacts_dir=self.artifacts_dir,
             )
         else:
             if before_features is None:
@@ -716,6 +730,16 @@ class Harness:
     def _run_bearings_commands(self, session_dir: Path) -> None:
         log_path = session_dir / "bearings.log"
         lines: list[str] = []
+        env = os.environ.copy()
+        env.update(
+            {
+                "LONGRUN_ARTIFACTS_DIR": self._display_path(self.artifacts_dir),
+                "LONGRUN_APP_SPEC_PATH": self._display_path(self.spec_file),
+                "LONGRUN_FEATURE_LIST_PATH": self._display_path(self.feature_file),
+                "LONGRUN_PROGRESS_PATH": self._display_path(self.progress_file),
+                "LONGRUN_INIT_SCRIPT_PATH": self._display_path(self.init_file),
+            }
+        )
 
         for command in self.config.bearings_commands:
             completed = subprocess.run(
@@ -723,6 +747,7 @@ class Harness:
                 cwd=self.project_dir,
                 capture_output=True,
                 text=True,
+                env=env,
             )
             lines.append(f"$ {command}\n")
             if completed.stdout:

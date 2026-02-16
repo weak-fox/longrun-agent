@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from longrun_agent.cli import _resolve_config_path, build_parser, run_go
-from longrun_agent.config import load_config
+from longrun_agent.cli import _resolve_config_path, _run_goal_setup_for_go, build_parser, run_go
+from longrun_agent.config import HarnessConfig, load_config
 
 
 def test_parser_accepts_go_command_arguments() -> None:
@@ -229,3 +229,42 @@ def test_resolve_config_path_prefers_local_default_when_file_exists(
         assert resolved == local_default
     finally:
         local_default.unlink(missing_ok=True)
+
+
+def test_goal_setup_writes_app_spec_into_artifacts_dir_when_configured(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from longrun_agent.cli import GuidedGoalDraft
+
+    config = HarnessConfig(
+        project_dir=tmp_path,
+        artifacts_dir=Path(".longrun/artifacts"),
+        agent_command=["echo", "ok"],
+        feature_target=20,
+    )
+
+    monkeypatch.setattr(
+        "longrun_agent.cli._generate_goal_draft_with_agent",
+        lambda _config, goal: GuidedGoalDraft(
+            goal=goal,
+            primary_users="Team",
+            core_flows=["A", "B", "C", "D"],
+            constraints=["Reuse existing stack"],
+            done_criteria="Done",
+            feature_target=22,
+            assumptions=[],
+        ),
+    )
+
+    _run_goal_setup_for_go(
+        config=config,
+        goal="Improve an existing project",
+        interactive=False,
+        brainstorm_rounds=0,
+        skip_brainstorm=True,
+        assume_yes=True,
+        feature_target_override=12,
+    )
+
+    assert (tmp_path / ".longrun" / "artifacts" / "app_spec.txt").exists()
+    assert not (tmp_path / "app_spec.txt").exists()
