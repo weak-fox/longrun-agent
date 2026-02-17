@@ -1816,6 +1816,7 @@ def run_improvement_cycle(
         "auto_bootstrap": {
             "enabled": auto_bootstrap,
             "attempted": False,
+            "reason": "",
             "requested_sessions": 0,
             "sampled_sessions": 0,
             "sampled_failures": 0,
@@ -1831,14 +1832,21 @@ def run_improvement_cycle(
         },
     }
 
-    if auto_bootstrap and report.session_count < min_sessions:
-        requested = (
-            bootstrap_sessions
-            if bootstrap_sessions is not None
-            else max(min_sessions - report.session_count, 0)
-        )
+    needs_session_count_bootstrap = report.session_count < min_sessions
+    needs_coding_signal_bootstrap = report.session_count > 0 and report.coding_sessions == 0
+    if auto_bootstrap and (needs_session_count_bootstrap or needs_coding_signal_bootstrap):
+        requested_default = max(min_sessions - report.session_count, 0)
+        if needs_coding_signal_bootstrap:
+            requested_default = max(requested_default, 3)
+        requested = bootstrap_sessions if bootstrap_sessions is not None else requested_default
+        requested = max(requested, 1)
         if requested > 0:
             orchestration["auto_bootstrap"]["attempted"] = True
+            orchestration["auto_bootstrap"]["reason"] = (
+                "insufficient_session_count"
+                if needs_session_count_bootstrap
+                else "no_coding_signal"
+            )
             orchestration["auto_bootstrap"]["requested_sessions"] = requested
             try:
                 sampling_config = load_config(config_path)

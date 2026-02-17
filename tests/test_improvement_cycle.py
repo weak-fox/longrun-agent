@@ -464,3 +464,55 @@ def test_run_improvement_cycle_auto_bootstraps_sessions_when_window_empty(
     assert payload["diagnosis"]["session_count"] == 1
     assert payload["orchestration"]["auto_bootstrap"]["attempted"] is True
     assert payload["orchestration"]["auto_bootstrap"]["sampled_sessions"] == 1
+
+
+def test_run_improvement_cycle_auto_bootstraps_when_only_initializer_samples_exist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    write_default_config(config_path, project_dir=tmp_path)
+    state_dir = tmp_path / ".longrun"
+    _write_session(
+        state_dir,
+        session_id=1,
+        phase="initializer",
+        success=False,
+        passing=0,
+        total=0,
+        progress_made=None,
+    )
+
+    def _fake_run_loop(self, max_sessions=None, continue_on_failure=False):
+        del max_sessions, continue_on_failure
+        _write_session(
+            self.state_dir,
+            session_id=2,
+            phase="coding",
+            success=True,
+            passing=1,
+            total=5,
+            progress_made=True,
+        )
+        return [SimpleNamespace(success=True)]
+
+    monkeypatch.setattr("longrun_agent.cli.Harness.run_loop", _fake_run_loop)
+
+    code = run_improvement_cycle(
+        config_path=config_path,
+        window=20,
+        max_failure_rate=1.0,
+        max_no_progress_rate=1.0,
+        min_sessions=1,
+        auto_bootstrap=True,
+        bootstrap_sessions=1,
+        auto_research=False,
+        topic=None,
+        enforce_budget=False,
+        as_json=False,
+    )
+
+    assert code == 0
+    payload = json.loads((tmp_path / ".longrun" / "artifacts" / "improvement-cycle.json").read_text())
+    assert payload["orchestration"]["auto_bootstrap"]["attempted"] is True
+    assert payload["orchestration"]["auto_bootstrap"]["reason"] == "no_coding_signal"
