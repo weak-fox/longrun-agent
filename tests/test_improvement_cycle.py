@@ -11,6 +11,7 @@ from longrun_agent.improvement_cycle import (
     ImprovementTargets,
     evaluate_budget_gate,
 )
+from longrun_agent.runtime.contracts import AgentRunResult
 
 
 def _write_session(
@@ -128,6 +129,8 @@ def test_parser_accepts_improvement_research_arguments() -> None:
     assert args.source_type == "community"
     assert args.claim == ["Small batches reduce risk."]
     assert args.tags == "batch_size,risk"
+    assert args.max_sources == 6
+    assert args.max_claims == 12
 
 
 def test_evaluate_budget_gate_blocks_when_failure_rate_exceeds_target() -> None:
@@ -257,6 +260,9 @@ def test_run_improvement_research_adds_local_evidence_entry(tmp_path: Path) -> N
     code = run_improvement_research(
         config_path=config_path,
         list_only=False,
+        topic=None,
+        max_sources=6,
+        max_claims=12,
         source_id="community_playbook",
         title="Community playbook",
         url="https://example.com/playbook",
@@ -273,6 +279,73 @@ def test_run_improvement_research_adds_local_evidence_entry(tmp_path: Path) -> N
     assert any(
         item["source_id"] == "community_playbook"
         and "Small batches reduce risk." in item["statement"]
+        for item in payload["claims"]
+    )
+
+
+def test_run_improvement_research_topic_auto_collects_bundle(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    write_default_config(config_path, project_dir=tmp_path)
+
+    class FakeBackend:
+        def run(self, request):
+            request.session_dir.mkdir(parents=True, exist_ok=True)
+            stdout_path = request.session_dir / "agent.stdout.log"
+            stderr_path = request.session_dir / "agent.stderr.log"
+            stdout_path.write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "title": "Research Source",
+                                "url": "https://example.com/research-source",
+                                "source_type": "community",
+                                "rationale": "useful",
+                                "tags": ["metrics"],
+                            }
+                        ],
+                        "claims": [
+                            {
+                                "source_url": "https://example.com/research-source",
+                                "statement": "Use metrics windows for comparison.",
+                                "tags": ["metrics"],
+                            }
+                        ],
+                    }
+                )
+            )
+            stderr_path.write_text("")
+            return AgentRunResult(
+                backend="fake",
+                return_code=0,
+                timeout=False,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+
+    monkeypatch.setattr("longrun_agent.cli.create_backend", lambda **_kwargs: FakeBackend())
+
+    code = run_improvement_research(
+        config_path=config_path,
+        list_only=False,
+        topic="improve reliability",
+        max_sources=4,
+        max_claims=6,
+        source_id=None,
+        title=None,
+        url=None,
+        source_type="community",
+        claims=None,
+        tags="",
+        notes="",
+    )
+
+    assert code == 0
+    evidence_path = tmp_path / ".longrun" / "artifacts" / "improvement-evidence.json"
+    payload = json.loads(evidence_path.read_text())
+    assert any(item["url"] == "https://example.com/research-source" for item in payload["sources"])
+    assert any(
+        item["statement"] == "Use metrics windows for comparison."
         for item in payload["claims"]
     )
 

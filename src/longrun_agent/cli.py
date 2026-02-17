@@ -35,6 +35,7 @@ from .runtime.context_guidance import (
 from .improvement_cycle import (
     SOURCE_TYPE_CHOICES,
     ImprovementTargets,
+    add_research_bundle,
     add_research_evidence,
     build_cycle_payload,
     build_diagnosis,
@@ -322,6 +323,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="List current evidence sources and claims",
     )
     improvement_research.add_argument(
+        "--topic",
+        type=str,
+        default=None,
+        help="Research topic for automatic evidence discovery (web + repo context)",
+    )
+    improvement_research.add_argument(
+        "--max-sources",
+        type=int,
+        default=6,
+        help="Maximum sources to collect in auto research mode (default: 6)",
+    )
+    improvement_research.add_argument(
+        "--max-claims",
+        type=int,
+        default=12,
+        help="Maximum claims to collect in auto research mode (default: 12)",
+    )
+    improvement_research.add_argument(
         "--source-id",
         type=str,
         default=None,
@@ -572,6 +591,175 @@ def _extract_json_object(text: str) -> dict:
     if not isinstance(parsed, dict):
         raise ValueError("agent JSON output is not an object")
     return parsed
+
+
+def _build_improvement_research_prompt(
+    *,
+    topic: str,
+    max_sources: int,
+    max_claims: int,
+    backend_name: str,
+) -> str:
+    instruction_file = instruction_file_for_backend(backend_name)
+    guidance = build_instruction_and_layered_reading_guidance(backend_name)
+    return dedent(
+        f"""\
+        You are a research analyst for improving an autonomous coding harness.
+        Do focused web research and return evidence for this topic:
+
+        {topic}
+
+        Before research:
+        - Read `{instruction_file}` first if present.
+        - Use layered repo reading to anchor research in this repository's actual constraints.
+        {guidance}
+
+        Research requirements:
+        - Prefer high-signal sources: official docs/standards, vendor engineering docs, high-quality community references.
+        - Avoid duplicate sources and duplicate claims.
+        - Each claim must be actionable for process/architecture decisions in this repo.
+
+        Return ONLY valid JSON (no markdown, no code fences) with shape:
+        {{
+          "sources": [
+            {{
+              "title": "string",
+              "url": "https://...",
+              "source_type": "official|vendor|community",
+              "rationale": "why this source is relevant",
+              "tags": ["string"]
+            }}
+          ],
+          "claims": [
+            {{
+              "source_url": "https://...",
+              "statement": "single actionable claim",
+              "tags": ["string"]
+            }}
+          ]
+        }}
+
+        Limits:
+        - sources: at most {max_sources}
+        - claims: at most {max_claims}
+        """
+    ).strip()
+
+
+def _parse_improvement_research_bundle(
+    raw_output: str,
+    *,
+    max_sources: int,
+    max_claims: int,
+    default_source_type: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    data = _extract_json_object(raw_output)
+    raw_sources = data.get("sources", [])
+    raw_claims = data.get("claims", [])
+
+    sources: list[dict[str, object]] = []
+    if isinstance(raw_sources, list):
+        for item in raw_sources:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", item.get("name", ""))).strip()
+            url = str(item.get("url", "")).strip()
+            if not title or not url:
+                continue
+            source_type = str(item.get("source_type", default_source_type)).strip().lower()
+            if source_type not in SOURCE_TYPE_CHOICES:
+                source_type = default_source_type
+            tags = item.get("tags", [])
+            if not isinstance(tags, list):
+                tags = []
+            sources.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "source_type": source_type,
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+                }
+            )
+    sources = sources[:max_sources]
+
+    source_urls = {str(item["url"]) for item in sources}
+    claims: list[dict[str, object]] = []
+    if isinstance(raw_claims, list):
+        for item in raw_claims:
+            if not isinstance(item, dict):
+                continue
+            source_url = str(item.get("source_url", "")).strip()
+            statement = str(item.get("statement", "")).strip()
+            if not source_url or not statement:
+                continue
+            if source_urls and source_url not in source_urls:
+                continue
+            tags = item.get("tags", [])
+            if not isinstance(tags, list):
+                tags = []
+            claims.append(
+                {
+                    "source_url": source_url,
+                    "statement": statement,
+                    "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+                }
+            )
+    claims = claims[:max_claims]
+    return sources, claims
+
+
+def _run_auto_improvement_research(
+    *,
+    config,
+    topic: str,
+    max_sources: int,
+    max_claims: int,
+    source_type: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    research_dir = config.project_dir / ".longrun" / "improvement-research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = research_dir / "auto-research.prompt.md"
+    prompt_file.write_text(
+        _build_improvement_research_prompt(
+            topic=topic,
+            max_sources=max_sources,
+            max_claims=max_claims,
+            backend_name=config.backend_name,
+        )
+    )
+
+    backend = create_backend(
+        backend_name=config.backend_name,
+        project_dir=config.project_dir,
+        command_template=config.agent_command,
+        model=config.backend_model,
+    )
+    run_result = backend.run(
+        AgentRunRequest(
+            phase="initializer",
+            project_dir=config.project_dir,
+            prompt_file=prompt_file,
+            session_dir=research_dir,
+            timeout_seconds=min(config.agent_timeout_seconds, 900),
+            backend_model=config.backend_model,
+            model_reasoning_effort=config.model_reasoning_effort,
+        )
+    )
+    if run_result.timeout:
+        raise RuntimeError("auto research timed out")
+    if run_result.return_code not in {0, None}:
+        stderr = run_result.stderr_path.read_text().strip() if run_result.stderr_path.exists() else ""
+        raise RuntimeError(f"auto research failed (code={run_result.return_code}): {stderr}")
+    if not run_result.stdout_path.exists():
+        raise RuntimeError("auto research produced no stdout output")
+
+    return _parse_improvement_research_bundle(
+        run_result.stdout_path.read_text(),
+        max_sources=max_sources,
+        max_claims=max_claims,
+        default_source_type=source_type,
+    )
 
 
 def _normalize_text_list(value: object, *, fallback: list[str]) -> list[str]:
@@ -1667,6 +1855,9 @@ def run_improvement_research(
     *,
     config_path: Path,
     list_only: bool,
+    topic: str | None,
+    max_sources: int,
+    max_claims: int,
     source_id: str | None,
     title: str | None,
     url: str | None,
@@ -1675,12 +1866,46 @@ def run_improvement_research(
     tags: str,
     notes: str,
 ) -> int:
+    if max_sources <= 0:
+        print("--max-sources must be a positive integer", file=sys.stderr)
+        return 2
+    if max_claims <= 0:
+        print("--max-claims must be a positive integer", file=sys.stderr)
+        return 2
+
     config = load_config(config_path)
     harness = Harness(config)
     harness.bootstrap()
 
     research_path = evidence_file_path(harness.artifacts_dir)
     payload = load_research_evidence(research_path, bootstrap_if_missing=True)
+
+    topic_value = (topic or "").strip()
+    if topic_value:
+        try:
+            auto_sources, auto_claims = _run_auto_improvement_research(
+                config=config,
+                topic=topic_value,
+                max_sources=max_sources,
+                max_claims=max_claims,
+                source_type=source_type,
+            )
+        except Exception as exc:
+            print(f"auto research failed: {exc}", file=sys.stderr)
+            return 1
+
+        payload = add_research_bundle(
+            path=research_path,
+            sources=[dict(item) for item in auto_sources],
+            claims=[dict(item) for item in auto_claims],
+            default_source_type=source_type,
+        )
+        print(f"updated={research_path}")
+        print(
+            f"topic={topic_value} sources_added~={len(auto_sources)} claims_added~={len(auto_claims)}"
+        )
+        print(f"sources={len(payload.get('sources', []))} claims={len(payload.get('claims', []))}")
+        return 0
 
     adding_requested = any(
         value is not None and str(value).strip()
@@ -1943,6 +2168,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_improvement_research(
             config_path=resolved_config_path,
             list_only=args.list,
+            topic=args.topic,
+            max_sources=args.max_sources,
+            max_claims=args.max_claims,
             source_id=args.source_id,
             title=args.title,
             url=args.url,

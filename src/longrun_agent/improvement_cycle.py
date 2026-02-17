@@ -6,7 +6,9 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 from .self_improve import SelfImproveReport
 
@@ -160,6 +162,39 @@ def _normalize_tags(raw: object) -> list[str]:
         seen.add(tag)
         result.append(tag)
     return result
+
+
+def _slugify(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower())
+    normalized = normalized.strip("_")
+    return normalized or "source"
+
+
+def _derive_source_id(
+    *,
+    url: str,
+    title: str,
+    existing_ids: set[str],
+) -> str:
+    parsed = urlparse(url)
+    host = _slugify(parsed.netloc.replace("www.", ""))
+    path = _slugify(parsed.path)
+    title_part = _slugify(title)
+    candidates = [
+        f"{host}_{path}" if path else host,
+        title_part,
+        "research_source",
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        if base not in existing_ids:
+            return base
+        index = 2
+        while f"{base}_{index}" in existing_ids:
+            index += 1
+        return f"{base}_{index}"
+    return f"research_source_{len(existing_ids) + 1}"
 
 
 def evidence_file_path(artifacts_dir: Path) -> Path:
@@ -464,6 +499,119 @@ def add_research_evidence(
             }
         )
         next_index += 1
+
+    payload = _coerce_evidence_payload(payload)
+    save_research_evidence(path, payload)
+    return payload
+
+
+def add_research_bundle(
+    *,
+    path: Path,
+    sources: list[dict[str, Any]],
+    claims: list[dict[str, Any]],
+    default_source_type: str = "community",
+) -> dict[str, Any]:
+    payload = load_research_evidence(path, bootstrap_if_missing=True)
+    payload = _coerce_evidence_payload(payload)
+
+    source_type_fallback = default_source_type.strip().lower()
+    if source_type_fallback not in SOURCE_TYPE_CHOICES:
+        source_type_fallback = "community"
+
+    source_map_by_id: dict[str, dict[str, Any]] = {
+        item["source_id"]: item for item in payload["sources"]
+    }
+    source_id_by_url: dict[str, str] = {
+        str(item.get("url", "")).strip(): item["source_id"]
+        for item in payload["sources"]
+        if str(item.get("url", "")).strip()
+    }
+    existing_ids = set(source_map_by_id.keys())
+
+    for source in sources:
+        url = str(source.get("url", "")).strip()
+        title = str(source.get("name", source.get("title", ""))).strip()
+        if not url or not title:
+            continue
+        source_id = str(source.get("source_id", "")).strip()
+        if not source_id:
+            source_id = source_id_by_url.get(url, "")
+        if not source_id:
+            source_id = _derive_source_id(url=url, title=title, existing_ids=existing_ids)
+        source_type = str(source.get("source_type", source_type_fallback)).strip().lower()
+        if source_type not in SOURCE_TYPE_CHOICES:
+            source_type = source_type_fallback
+        tags = _normalize_tags(source.get("tags"))
+        existing = source_map_by_id.get(source_id, {})
+        merged_tags = _normalize_tags(list(existing.get("tags", [])) + tags)
+        merged = {
+            "source_id": source_id,
+            "name": title,
+            "url": url,
+            "source_type": source_type,
+            "rationale": str(source.get("rationale", existing.get("rationale", ""))).strip(),
+            "tags": merged_tags,
+            "retrieved_at": _now_iso(),
+        }
+        source_map_by_id[source_id] = merged
+        source_id_by_url[url] = source_id
+        existing_ids.add(source_id)
+
+    payload["sources"] = sorted(source_map_by_id.values(), key=lambda item: item["source_id"])
+
+    existing_claim_pairs = {
+        (
+            str(item.get("source_id", "")).strip(),
+            str(item.get("statement", "")).strip().lower(),
+        )
+        for item in payload["claims"]
+        if str(item.get("source_id", "")).strip() and str(item.get("statement", "")).strip()
+    }
+    max_index_by_source: dict[str, int] = {}
+    for claim in payload["claims"]:
+        source_id = str(claim.get("source_id", "")).strip()
+        claim_id = str(claim.get("claim_id", "")).strip()
+        if not source_id or not claim_id.startswith(f"{source_id}-c"):
+            continue
+        try:
+            index = int(claim_id.split("-c")[-1])
+        except ValueError:
+            continue
+        max_index_by_source[source_id] = max(max_index_by_source.get(source_id, 0), index)
+
+    for claim in claims:
+        statement = str(claim.get("statement", "")).strip()
+        if not statement:
+            continue
+        source_id = str(claim.get("source_id", "")).strip()
+        if not source_id:
+            source_url = str(claim.get("source_url", "")).strip()
+            source_id = source_id_by_url.get(source_url, "")
+        if not source_id or source_id not in source_map_by_id:
+            continue
+
+        key = (source_id, statement.lower())
+        if key in existing_claim_pairs:
+            continue
+        existing_claim_pairs.add(key)
+
+        max_index_by_source[source_id] = max_index_by_source.get(source_id, 0) + 1
+        claim_id = str(claim.get("claim_id", "")).strip()
+        if not claim_id:
+            claim_id = f"{source_id}-c{max_index_by_source[source_id]}"
+        payload["claims"].append(
+            {
+                "claim_id": claim_id,
+                "source_id": source_id,
+                "statement": statement,
+                "tags": _normalize_tags(
+                    list(source_map_by_id[source_id].get("tags", []))
+                    + _normalize_tags(claim.get("tags"))
+                ),
+                "created_at": _now_iso(),
+            }
+        )
 
     payload = _coerce_evidence_payload(payload)
     save_research_evidence(path, payload)

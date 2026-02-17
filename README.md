@@ -29,7 +29,7 @@ longrun-agent run-loop [--max-sessions ... --continue-on-failure --backend ... -
 longrun-agent status [--json]
 longrun-agent self-improve [--window 20] [--apply|--no-apply]
 longrun-agent improvement-cycle [--window 20] [--max-failure-rate 0.10] [--max-no-progress-rate 0.25] [--min-sessions 10] [--enforce-budget] [--json]
-longrun-agent improvement-research [--list] [--source-id ... --title ... --url ... --source-type official|vendor|community --claim ... --tags ...]
+longrun-agent improvement-research [--list] [--topic "..."] [--max-sources 6] [--max-claims 12]
 ```
 
 ## 自动验证脚本
@@ -245,7 +245,10 @@ longrun-agent improvement-cycle --window 20 --min-sessions 10
 # 查看当前证据库
 longrun-agent improvement-research --list
 
-# 新增一条调研来源与 claim（可重复 --claim）
+# 自动调研（推荐，只给 topic，agent 会做全网调研并入库）
+longrun-agent improvement-research --topic "how to reduce agent run-loop failure rate"
+
+# 手动补充一条来源与 claim（兜底模式，可重复 --claim）
 longrun-agent improvement-research \
   --source-id community_playbook \
   --title "Community playbook" \
@@ -258,6 +261,7 @@ longrun-agent improvement-research \
 说明：
 - `improvement-cycle` 会先读取 `.longrun/artifacts/improvement-evidence.json`
 - Hypotheses/Experiment Plans 必须绑定 `evidence_claim_ids` 与 `source_ids`
+- `improvement-research --topic` 会调用当前 backend 自动调研并提取 sources/claims 入库
 - 证据不足时会被 budget gate 标记为 `hold`
 - `improvement-cycle` 会记录每轮已用 claims 到 `.longrun/artifacts/improvement-memory.json`
 - 下轮会优先选择未使用/少使用 claims，并尽量避免与上一轮完全相同的 claim 集合
