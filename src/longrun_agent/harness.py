@@ -248,6 +248,19 @@ class Harness:
                 readonly_retry_attempted = True
                 run = retried
                 readonly_retry_recovered = not run["timeout"] and run["return_code"] == 0
+        transient_retry_attempted = False
+        transient_retry_recovered = False
+        if not run["timeout"] and run["return_code"] != 0:
+            retried = self._retry_if_transient_backend_failure(
+                phase=phase,
+                prompt_file=prompt_file,
+                session_dir=session_dir,
+                failed_run=run,
+            )
+            if retried is not None:
+                transient_retry_attempted = True
+                run = retried
+                transient_retry_recovered = not run["timeout"] and run["return_code"] == 0
 
         if run["timeout"]:
             timeout_note = (
@@ -255,6 +268,8 @@ class Harness:
                 if readonly_retry_attempted
                 else ""
             )
+            if transient_retry_attempted:
+                timeout_note = f"{timeout_note} (transient backend retry attempted)"
             result = SessionResult(
                 session_id=session_id,
                 phase=phase,
@@ -273,6 +288,8 @@ class Harness:
         if run["return_code"] != 0:
             stderr_tail = self._last_non_empty_log_line(run["stderr_path"])
             retry_note = " (workspace-write retry attempted)" if readonly_retry_attempted else ""
+            if transient_retry_attempted:
+                retry_note = f"{retry_note} (transient backend retry attempted)"
             hint = (
                 " If this keeps failing, use a codex command with "
                 "--dangerously-bypass-approvals-and-sandbox in an isolated environment."
@@ -522,6 +539,8 @@ class Harness:
             )
         if readonly_retry_recovered:
             completion_notes.append("recovered from read-only sandbox via workspace-write retry")
+        if transient_retry_recovered:
+            completion_notes.append("recovered from transient backend failure via retry")
 
         message = "Session completed"
         if completion_notes:
@@ -837,6 +856,32 @@ class Harness:
             metadata={"force_workspace_write": True, "retry_reason": "readonly_sandbox"},
         )
 
+    def _retry_if_transient_backend_failure(
+        self,
+        phase: str,
+        prompt_file: Path,
+        session_dir: Path,
+        failed_run: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self.config.backend_name != "codex_cli":
+            return None
+        if phase not in {"initializer", "coding"}:
+            return None
+        if not self._is_transient_backend_error(
+            stderr_path=failed_run["stderr_path"],
+            stdout_path=failed_run["stdout_path"],
+        ):
+            return None
+
+        retry_dir = session_dir / "retry-transient-backend"
+        retry_dir.mkdir(parents=True, exist_ok=True)
+        return self._run_agent_command(
+            phase=phase,
+            prompt_file=prompt_file,
+            session_dir=retry_dir,
+            metadata={"retry_reason": "transient_backend"},
+        )
+
     @staticmethod
     def _is_readonly_sandbox_error(stderr_path: Path, stdout_path: Path) -> bool:
         chunks: list[str] = []
@@ -853,6 +898,23 @@ class Harness:
             "workspace is read-only",
             "readonly sandbox",
             "只读",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _is_transient_backend_error(stderr_path: Path, stdout_path: Path) -> bool:
+        chunks: list[str] = []
+        for path in (stderr_path, stdout_path):
+            try:
+                chunks.append(path.read_text())
+            except Exception:
+                continue
+        text = "\n".join(chunks).lower()
+        markers = (
+            "stream disconnected before completion",
+            "error sending request for url",
+            "transport error: network error",
+            "error decoding response body",
         )
         return any(marker in text for marker in markers)
 

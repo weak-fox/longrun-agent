@@ -516,3 +516,151 @@ def test_run_improvement_cycle_auto_bootstraps_when_only_initializer_samples_exi
     payload = json.loads((tmp_path / ".longrun" / "artifacts" / "improvement-cycle.json").read_text())
     assert payload["orchestration"]["auto_bootstrap"]["attempted"] is True
     assert payload["orchestration"]["auto_bootstrap"]["reason"] == "no_coding_signal"
+
+
+def test_run_improvement_cycle_auto_continues_when_reliability_budget_holds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    write_default_config(config_path, project_dir=tmp_path)
+    state_dir = tmp_path / ".longrun"
+    _write_session(
+        state_dir,
+        session_id=1,
+        phase="coding",
+        success=False,
+        passing=0,
+        total=5,
+        progress_made=False,
+    )
+    _write_session(
+        state_dir,
+        session_id=2,
+        phase="coding",
+        success=False,
+        passing=0,
+        total=5,
+        progress_made=False,
+    )
+
+    def _fake_run_loop(self, max_sessions=None, continue_on_failure=False):
+        assert max_sessions == 1
+        assert continue_on_failure is True
+        _write_session(
+            self.state_dir,
+            session_id=3,
+            phase="coding",
+            success=True,
+            passing=1,
+            total=5,
+            progress_made=True,
+        )
+        return [SimpleNamespace(success=True)]
+
+    monkeypatch.setattr("longrun_agent.cli.Harness.run_loop", _fake_run_loop)
+
+    code = run_improvement_cycle(
+        config_path=config_path,
+        window=20,
+        max_failure_rate=0.7,
+        max_no_progress_rate=1.0,
+        min_sessions=1,
+        auto_bootstrap=True,
+        bootstrap_sessions=1,
+        auto_research=False,
+        topic=None,
+        enforce_budget=False,
+        as_json=False,
+    )
+
+    assert code == 0
+    payload = json.loads((tmp_path / ".longrun" / "artifacts" / "improvement-cycle.json").read_text())
+    assert payload["orchestration"]["auto_continue"]["attempted"] is True
+    assert payload["orchestration"]["auto_continue"]["sampled_sessions"] == 1
+    assert payload["orchestration"]["auto_continue"]["post_budget_gate"] == "promote"
+    assert payload["diagnosis"]["session_count"] == 3
+    assert payload["budget_gate"]["status"] == "promote"
+
+
+def test_run_improvement_cycle_auto_continue_scales_sampling_budget_for_severe_hold(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    write_default_config(config_path, project_dir=tmp_path)
+    state_dir = tmp_path / ".longrun"
+    _write_session(
+        state_dir,
+        session_id=1,
+        phase="coding",
+        success=False,
+        passing=0,
+        total=5,
+        progress_made=False,
+    )
+    _write_session(
+        state_dir,
+        session_id=2,
+        phase="coding",
+        success=True,
+        passing=1,
+        total=5,
+        progress_made=True,
+    )
+    _write_session(
+        state_dir,
+        session_id=3,
+        phase="coding",
+        success=True,
+        passing=2,
+        total=5,
+        progress_made=True,
+    )
+    _write_session(
+        state_dir,
+        session_id=4,
+        phase="coding",
+        success=False,
+        passing=2,
+        total=5,
+        progress_made=False,
+    )
+    _write_session(
+        state_dir,
+        session_id=5,
+        phase="coding",
+        success=False,
+        passing=2,
+        total=5,
+        progress_made=False,
+    )
+
+    captured_max_sessions: list[int | None] = []
+
+    def _fake_run_loop(self, max_sessions=None, continue_on_failure=False):
+        captured_max_sessions.append(max_sessions)
+        assert continue_on_failure is True
+        return []
+
+    monkeypatch.setattr("longrun_agent.cli.Harness.run_loop", _fake_run_loop)
+
+    code = run_improvement_cycle(
+        config_path=config_path,
+        window=20,
+        max_failure_rate=0.1,
+        max_no_progress_rate=1.0,
+        min_sessions=1,
+        auto_bootstrap=True,
+        bootstrap_sessions=None,
+        auto_research=False,
+        topic=None,
+        enforce_budget=False,
+        as_json=False,
+    )
+
+    assert code == 0
+    assert captured_max_sessions == [20]
+    payload = json.loads((tmp_path / ".longrun" / "artifacts" / "improvement-cycle.json").read_text())
+    assert payload["orchestration"]["auto_continue"]["attempted"] is True
+    assert payload["orchestration"]["auto_continue"]["requested_sessions"] == 20

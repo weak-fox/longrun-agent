@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import os
 import shlex
@@ -34,6 +35,8 @@ from .runtime.context_guidance import (
 )
 from .improvement_cycle import (
     SOURCE_TYPE_CHOICES,
+    BudgetGateDecision,
+    Diagnosis,
     ImprovementTargets,
     add_research_bundle,
     add_research_evidence,
@@ -52,7 +55,12 @@ from .improvement_cycle import (
     render_cycle_markdown,
     select_research_claims_for_diagnosis,
 )
-from .self_improve import analyze_recent_sessions, build_recommendations, render_plan_markdown
+from .self_improve import (
+    SelfImproveReport,
+    analyze_recent_sessions,
+    build_recommendations,
+    render_plan_markdown,
+)
 
 BACKEND_CHOICES = ("codex_cli", "claude_sdk")
 PROFILE_CHOICES = ("default", "article")
@@ -304,8 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
             action=argparse.BooleanOptionalAction,
             default=True,
             help=(
-                "Automatically run sampling sessions when session window is below min-sessions "
-                "(default: true)"
+                "Automatically run sampling sessions when session window is below min-sessions, "
+                "or when budget gate is hold on reliability metrics (default: true)"
             ),
         )
         command_parser.add_argument(
@@ -1822,6 +1830,16 @@ def run_improvement_cycle(
             "sampled_failures": 0,
             "error": "",
         },
+        "auto_continue": {
+            "enabled": auto_bootstrap,
+            "attempted": False,
+            "reason": "",
+            "requested_sessions": 0,
+            "sampled_sessions": 0,
+            "sampled_failures": 0,
+            "error": "",
+            "post_budget_gate": "",
+        },
         "auto_research": {
             "enabled": auto_research,
             "attempted": False,
@@ -1831,6 +1849,52 @@ def run_improvement_cycle(
             "error": "",
         },
     }
+
+    def _run_sampling_sessions(requested: int) -> tuple[int, int]:
+        sampling_config = load_config(config_path)
+        sampling_config.auto_continue_delay_seconds = 0
+        sampling_harness = Harness(sampling_config)
+        sampling_harness.bootstrap()
+        results = sampling_harness.run_loop(
+            max_sessions=requested,
+            continue_on_failure=True,
+        )
+        sampled_sessions = len(results)
+        sampled_failures = sum(1 for item in results if not item.success)
+        return sampled_sessions, sampled_failures
+
+    def _is_reliability_hold(decision: BudgetGateDecision) -> bool:
+        return any(
+            reason.startswith("failure_rate_exceeded")
+            or reason.startswith("no_progress_rate_exceeded")
+            for reason in decision.reasons
+        )
+
+    def _recommended_auto_continue_sessions(current_report: SelfImproveReport) -> int:
+        recommended = 1
+        hard_cap = max(window, min_sessions, 20)
+
+        if current_report.failure_count > 0:
+            if targets.max_failure_rate <= 0.0:
+                recommended = hard_cap
+            else:
+                required = math.ceil(
+                    (current_report.failure_count / targets.max_failure_rate)
+                    - current_report.session_count
+                )
+                recommended = max(recommended, required)
+
+        if current_report.no_progress_sessions > 0:
+            if targets.max_no_progress_rate <= 0.0:
+                recommended = hard_cap
+            else:
+                required = math.ceil(
+                    (current_report.no_progress_sessions / targets.max_no_progress_rate)
+                    - current_report.coding_sessions
+                )
+                recommended = max(recommended, required)
+
+        return max(1, min(recommended, hard_cap))
 
     needs_session_count_bootstrap = report.session_count < min_sessions
     needs_coding_signal_bootstrap = report.session_count > 0 and report.coding_sessions == 0
@@ -1849,18 +1913,9 @@ def run_improvement_cycle(
             )
             orchestration["auto_bootstrap"]["requested_sessions"] = requested
             try:
-                sampling_config = load_config(config_path)
-                sampling_config.auto_continue_delay_seconds = 0
-                sampling_harness = Harness(sampling_config)
-                sampling_harness.bootstrap()
-                results = sampling_harness.run_loop(
-                    max_sessions=requested,
-                    continue_on_failure=True,
-                )
-                orchestration["auto_bootstrap"]["sampled_sessions"] = len(results)
-                orchestration["auto_bootstrap"]["sampled_failures"] = sum(
-                    1 for item in results if not item.success
-                )
+                sampled_sessions, sampled_failures = _run_sampling_sessions(requested)
+                orchestration["auto_bootstrap"]["sampled_sessions"] = sampled_sessions
+                orchestration["auto_bootstrap"]["sampled_failures"] = sampled_failures
             except Exception as exc:
                 orchestration["auto_bootstrap"]["error"] = str(exc)
         report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
@@ -1883,59 +1938,70 @@ def run_improvement_cycle(
             "no-progress sessions with evidence-driven experiments"
         )
 
-    if auto_research and not research_evidence.get("claims"):
-        orchestration["auto_research"]["attempted"] = True
-        orchestration["auto_research"]["topic"] = topic_value
-        try:
-            auto_sources, auto_claims = _run_auto_improvement_research(
-                config=config,
-                topic=topic_value,
-                max_sources=6,
-                max_claims=12,
-                source_type="community",
-            )
-            research_evidence = add_research_bundle(
-                path=research_path,
-                sources=[dict(item) for item in auto_sources],
-                claims=[dict(item) for item in auto_claims],
-                default_source_type="community",
-            )
-            orchestration["auto_research"]["sources_added_estimate"] = len(auto_sources)
-            orchestration["auto_research"]["claims_added_estimate"] = len(auto_claims)
-        except Exception as exc:
-            orchestration["auto_research"]["error"] = str(exc)
+    def _select_claims_with_auto_research(
+        current_diagnosis: Diagnosis,
+        current_research_evidence: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if auto_research and not current_research_evidence.get("claims"):
+            orchestration["auto_research"]["attempted"] = True
+            orchestration["auto_research"]["topic"] = topic_value
+            try:
+                auto_sources, auto_claims = _run_auto_improvement_research(
+                    config=config,
+                    topic=topic_value,
+                    max_sources=6,
+                    max_claims=12,
+                    source_type="community",
+                )
+                current_research_evidence = add_research_bundle(
+                    path=research_path,
+                    sources=[dict(item) for item in auto_sources],
+                    claims=[dict(item) for item in auto_claims],
+                    default_source_type="community",
+                )
+                orchestration["auto_research"]["sources_added_estimate"] += len(auto_sources)
+                orchestration["auto_research"]["claims_added_estimate"] += len(auto_claims)
+            except Exception as exc:
+                orchestration["auto_research"]["error"] = str(exc)
 
-    selected_research_claims = select_research_claims_for_diagnosis(
-        research_evidence,
+        selected_claims = select_research_claims_for_diagnosis(
+            current_research_evidence,
+            current_diagnosis,
+            memory=cycle_memory,
+        )
+        if auto_research and not selected_claims:
+            orchestration["auto_research"]["attempted"] = True
+            orchestration["auto_research"]["topic"] = topic_value
+            try:
+                auto_sources, auto_claims = _run_auto_improvement_research(
+                    config=config,
+                    topic=topic_value,
+                    max_sources=6,
+                    max_claims=12,
+                    source_type="community",
+                )
+                current_research_evidence = add_research_bundle(
+                    path=research_path,
+                    sources=[dict(item) for item in auto_sources],
+                    claims=[dict(item) for item in auto_claims],
+                    default_source_type="community",
+                )
+                orchestration["auto_research"]["sources_added_estimate"] += len(auto_sources)
+                orchestration["auto_research"]["claims_added_estimate"] += len(auto_claims)
+                selected_claims = select_research_claims_for_diagnosis(
+                    current_research_evidence,
+                    current_diagnosis,
+                    memory=cycle_memory,
+                )
+            except Exception as exc:
+                orchestration["auto_research"]["error"] = str(exc)
+
+        return current_research_evidence, selected_claims
+
+    research_evidence, selected_research_claims = _select_claims_with_auto_research(
         diagnosis,
-        memory=cycle_memory,
+        research_evidence,
     )
-    if auto_research and not selected_research_claims:
-        orchestration["auto_research"]["attempted"] = True
-        orchestration["auto_research"]["topic"] = topic_value
-        try:
-            auto_sources, auto_claims = _run_auto_improvement_research(
-                config=config,
-                topic=topic_value,
-                max_sources=6,
-                max_claims=12,
-                source_type="community",
-            )
-            research_evidence = add_research_bundle(
-                path=research_path,
-                sources=[dict(item) for item in auto_sources],
-                claims=[dict(item) for item in auto_claims],
-                default_source_type="community",
-            )
-            orchestration["auto_research"]["sources_added_estimate"] += len(auto_sources)
-            orchestration["auto_research"]["claims_added_estimate"] += len(auto_claims)
-            selected_research_claims = select_research_claims_for_diagnosis(
-                research_evidence,
-                diagnosis,
-                memory=cycle_memory,
-            )
-        except Exception as exc:
-            orchestration["auto_research"]["error"] = str(exc)
 
     budget_gate = evaluate_budget_gate(
         session_count=report.session_count,
@@ -1948,6 +2014,51 @@ def run_improvement_cycle(
         budget_gate,
         selected_research_claims,
     )
+
+    if auto_bootstrap and budget_gate.status != "promote" and _is_reliability_hold(budget_gate):
+        requested = (
+            bootstrap_sessions
+            if bootstrap_sessions is not None
+            else _recommended_auto_continue_sessions(report)
+        )
+        requested = max(requested, 1)
+        orchestration["auto_continue"]["attempted"] = True
+        orchestration["auto_continue"]["requested_sessions"] = requested
+        reliability_reasons = [
+            reason
+            for reason in budget_gate.reasons
+            if reason.startswith("failure_rate_exceeded")
+            or reason.startswith("no_progress_rate_exceeded")
+        ]
+        orchestration["auto_continue"]["reason"] = (
+            reliability_reasons[0] if reliability_reasons else "reliability_budget_hold"
+        )
+        try:
+            sampled_sessions, sampled_failures = _run_sampling_sessions(requested)
+            orchestration["auto_continue"]["sampled_sessions"] = sampled_sessions
+            orchestration["auto_continue"]["sampled_failures"] = sampled_failures
+        except Exception as exc:
+            orchestration["auto_continue"]["error"] = str(exc)
+
+        report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+        diagnosis = build_diagnosis(report)
+        research_evidence, selected_research_claims = _select_claims_with_auto_research(
+            diagnosis,
+            research_evidence,
+        )
+        budget_gate = evaluate_budget_gate(
+            session_count=report.session_count,
+            failure_count=report.failure_count,
+            coding_sessions=report.coding_sessions,
+            no_progress_sessions=report.no_progress_sessions,
+            targets=targets,
+        )
+        budget_gate = enforce_research_requirement(
+            budget_gate,
+            selected_research_claims,
+        )
+        orchestration["auto_continue"]["post_budget_gate"] = budget_gate.status
+
     hypotheses = build_hypotheses(diagnosis, selected_research_claims)
     experiment_plans = build_experiment_plans(hypotheses, targets, selected_research_claims)
     payload = build_cycle_payload(
@@ -2007,6 +2118,14 @@ def run_improvement_cycle(
                 "auto_research="
                 f"sources_added~:{orchestration['auto_research']['sources_added_estimate']} "
                 f"claims_added~:{orchestration['auto_research']['claims_added_estimate']}"
+            )
+        if orchestration["auto_continue"]["attempted"]:
+            print(
+                "auto_continue="
+                f"sessions_requested:{orchestration['auto_continue']['requested_sessions']} "
+                f"sampled:{orchestration['auto_continue']['sampled_sessions']} "
+                f"failures:{orchestration['auto_continue']['sampled_failures']} "
+                f"post_budget_gate:{orchestration['auto_continue']['post_budget_gate'] or budget_gate.status}"
             )
         print(
             f"budget_gate={budget_gate.status} "

@@ -287,6 +287,7 @@ longrun-agent improvement-research \
 - `improvement-cycle` 会先读取 `.longrun/artifacts/improvement-evidence.json`
 - `improvement-cycle` 默认会自动补全通路：
   - 会话不足时自动采样（`--auto-bootstrap`）
+  - 预算 gate 因可靠性指标 `hold` 时自动继续采样并复评（默认会按当前差距动态放大采样预算，可用 `--bootstrap-sessions` 覆盖）
   - 证据不足时自动调研（`--auto-research`）
 - Hypotheses/Experiment Plans 必须绑定 `evidence_claim_ids` 与 `source_ids`
 - `improvement-research --topic` 会调用当前 backend 自动调研并提取 sources/claims 入库
