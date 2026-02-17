@@ -30,13 +30,22 @@ class RemediationEngine:
         phase: str,
         gate: GateResult,
         before_features: list[dict[str, Any]] | None,
+        before_snapshot_path: Path | None = None,
     ) -> RemediationOutcome:
         actions_applied: list[str] = []
 
         for action in gate.remediation:
-            if action == "rollback_feature_list" and before_features is not None:
-                self.feature_file.write_text(json.dumps(before_features, indent=2) + "\n")
-                actions_applied.append(action)
+            if action == "rollback_feature_list":
+                restored = False
+                if before_snapshot_path is not None and before_snapshot_path.exists():
+                    self.feature_file.write_text(before_snapshot_path.read_text())
+                    restored = True
+                elif before_features is not None:
+                    self.feature_file.write_text(json.dumps(before_features, indent=2) + "\n")
+                    restored = True
+
+                if restored:
+                    actions_applied.append(action)
 
         report_path = self._write_report(
             session_id=session_id,
@@ -70,4 +79,3 @@ class RemediationEngine:
         }
         report_path.write_text(json.dumps(payload, indent=2) + "\n")
         return report_path
-

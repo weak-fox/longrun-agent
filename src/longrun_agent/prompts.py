@@ -73,8 +73,8 @@ def build_coding_prompt(
         - pwd
         - ls -la
         - cat {app_spec_path}
-        - head -n 80 {feature_list_path}
-        - tail -n 80 {progress_path} (if exists)
+        - inspect only entries around target index in {feature_list_path} when needed (avoid full-file reads)
+        - tail -n 30 {progress_path} (if exists)
         - git log --oneline -20 (if git repo)
 
         ### Current progress
@@ -94,6 +94,7 @@ def build_coding_prompt(
         5. Never mutate feature descriptions, steps, or ordering.
         6. Update `{progress_path}` with what changed, verification results, and blockers.
         7. Keep the working tree clean at session end where possible.
+        8. Do not load the full feature list unless evidence requires it; focus on target and nearby entries.
 
         ### App spec reminder
         {app_spec}

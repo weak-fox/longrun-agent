@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -77,7 +78,7 @@ artifacts_dir = ""
 auto_continue_delay_seconds = 3
 feature_target = 200
 max_no_progress_sessions = 5
-max_features_per_session = 1
+max_features_per_session = 3
 require_clean_git = false
 bearings_commands = [
   "pwd",
@@ -146,7 +147,7 @@ class HarnessConfig:
     auto_continue_delay_seconds: int = 3
     feature_target: int = 200
     max_no_progress_sessions: int = 5
-    max_features_per_session: int = 1
+    max_features_per_session: int = 3
     require_clean_git: bool = False
     commit_required: bool = False
     progress_update_required: bool = False
@@ -277,7 +278,7 @@ def load_config(path: Path) -> HarnessConfig:
         auto_continue_delay_seconds=int(harness_data.get("auto_continue_delay_seconds", 3)),
         feature_target=int(harness_data.get("feature_target", 200)),
         max_no_progress_sessions=int(harness_data.get("max_no_progress_sessions", 5)),
-        max_features_per_session=int(harness_data.get("max_features_per_session", 1)),
+        max_features_per_session=int(harness_data.get("max_features_per_session", 3)),
         require_clean_git=bool(harness_data.get("require_clean_git", False)),
         commit_required=bool(gates_data.get("commit_required", False)),
         progress_update_required=bool(gates_data.get("progress_update_required", False)),
@@ -290,55 +291,138 @@ def load_config(path: Path) -> HarnessConfig:
     )
 
 
-def save_config(path: Path, config: HarnessConfig) -> None:
-    """Persist config in a stable TOML layout."""
-    bool_value = lambda value: "true" if value else "false"
-    dump_list = lambda values: json.dumps(values, ensure_ascii=False)
-    quote = lambda value: json.dumps(value, ensure_ascii=False)
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+
+def _toml_key(key: str) -> str:
+    if _TOML_BARE_KEY_RE.match(key):
+        return key
+    return json.dumps(key, ensure_ascii=False)
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        rendered = ", ".join(_toml_value(item) for item in value)
+        return f"[{rendered}]"
+    if isinstance(value, dict):
+        rendered = ", ".join(f"{_toml_key(str(k))} = {_toml_value(v)}" for k, v in value.items())
+        return f"{{ {rendered} }}"
+    raise TypeError(f"Unsupported TOML value type: {type(value)!r}")
+
+
+def _append_toml_table(lines: list[str], table: dict[str, object], path: tuple[str, ...]) -> None:
+    if path:
+        header = ".".join(_toml_key(part) for part in path)
+        lines.append(f"[{header}]")
+
+    scalar_items: list[tuple[str, object]] = []
+    nested_items: list[tuple[str, dict[str, object]]] = []
+    for key, value in table.items():
+        if isinstance(value, dict):
+            nested_items.append((key, value))
+        else:
+            scalar_items.append((key, value))
+
+    for key, value in scalar_items:
+        lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+
+    for key, child in nested_items:
+        if lines and lines[-1] != "":
+            lines.append("")
+        _append_toml_table(lines, child, path + (key,))
+
+
+def _serialize_toml(data: dict[str, object]) -> str:
+    lines: list[str] = []
+    _append_toml_table(lines, data, ())
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def _managed_config_dict(config: HarnessConfig) -> dict[str, object]:
     codex_model = config.backend_model if config.backend_name == "codex_cli" else DEFAULT_CODEX_MODEL
     claude_model = config.backend_model if config.backend_name == "claude_sdk" else DEFAULT_CLAUDE_MODEL
 
-    lines = [
-        "[agent]",
-        "# Legacy fallback command. Prefer [backends.codex_cli].",
-        f"command = {dump_list(config.agent_command)}",
-        f"timeout_seconds = {int(config.agent_timeout_seconds)}",
-        "",
-        "[runtime]",
-        f"backend = {quote(config.backend_name)}",
-        f"profile = {quote(config.profile)}",
-        f"backend_model = {quote(config.backend_model)}",
-        f"model_reasoning_effort = {quote(config.model_reasoning_effort or '')}",
-        "",
-        "[backends.codex_cli]",
-        "# Placeholders: {project_dir} {session_dir} {prompt_file} {phase} {backend_model}",
-        f"command = {dump_list(config.agent_command)}",
-        f"model = {quote(codex_model)}",
-        f"timeout_seconds = {int(config.agent_timeout_seconds)}",
-        "",
-        "[backends.claude_sdk]",
-        f"model = {quote(claude_model)}",
-        "",
-        "[gates]",
-        f"commit_required = {bool_value(config.commit_required)}",
-        f"progress_update_required = {bool_value(config.progress_update_required)}",
-        "repair_on_verification_failure = "
-        f"{bool_value(config.repair_on_verification_failure)}",
-        "",
-        "[harness]",
-        f"project_dir = {quote(config.project_dir.as_posix())}",
-        f"state_dir = {quote(config.state_dir.as_posix() if config.state_dir else '')}",
-        f"artifacts_dir = {quote(config.artifacts_dir.as_posix() if config.artifacts_dir else '')}",
-        f"auto_continue_delay_seconds = {int(config.auto_continue_delay_seconds)}",
-        f"feature_target = {int(config.feature_target)}",
-        f"max_no_progress_sessions = {int(config.max_no_progress_sessions)}",
-        f"max_features_per_session = {int(config.max_features_per_session)}",
-        f"require_clean_git = {bool_value(config.require_clean_git)}",
-        f"bearings_commands = {dump_list(config.bearings_commands)}",
-        f"pre_coding_commands = {dump_list(config.pre_coding_commands)}",
-        f"verification_commands = {dump_list(config.verification_commands)}",
-        "",
-    ]
+    return {
+        "agent": {
+            "command": list(config.agent_command),
+            "timeout_seconds": int(config.agent_timeout_seconds),
+        },
+        "runtime": {
+            "backend": config.backend_name,
+            "profile": config.profile,
+            "backend_model": config.backend_model,
+            "model_reasoning_effort": config.model_reasoning_effort or "",
+        },
+        "backends": {
+            "codex_cli": {
+                "command": list(config.agent_command),
+                "model": codex_model,
+                "timeout_seconds": int(config.agent_timeout_seconds),
+            },
+            "claude_sdk": {
+                "model": claude_model,
+            },
+        },
+        "gates": {
+            "commit_required": bool(config.commit_required),
+            "progress_update_required": bool(config.progress_update_required),
+            "repair_on_verification_failure": bool(config.repair_on_verification_failure),
+        },
+        "harness": {
+            "project_dir": config.project_dir.as_posix(),
+            "state_dir": config.state_dir.as_posix() if config.state_dir else "",
+            "artifacts_dir": config.artifacts_dir.as_posix() if config.artifacts_dir else "",
+            "auto_continue_delay_seconds": int(config.auto_continue_delay_seconds),
+            "feature_target": int(config.feature_target),
+            "max_no_progress_sessions": int(config.max_no_progress_sessions),
+            "max_features_per_session": int(config.max_features_per_session),
+            "require_clean_git": bool(config.require_clean_git),
+            "bearings_commands": list(config.bearings_commands),
+            "pre_coding_commands": list(config.pre_coding_commands),
+            "verification_commands": list(config.verification_commands),
+        },
+    }
+
+
+def _merge_preserving_unmanaged_fields(
+    existing: dict[str, object],
+    managed: dict[str, object],
+) -> dict[str, object]:
+    merged: dict[str, object] = dict(existing)
+    for key, value in managed.items():
+        if isinstance(value, dict):
+            current = merged.get(key)
+            if not isinstance(current, dict):
+                current = {}
+                merged[key] = current
+            merged[key] = _merge_preserving_unmanaged_fields(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def save_config(path: Path, config: HarnessConfig, *, preserve_unmanaged: bool = False) -> None:
+    """Persist config in TOML layout.
+
+    When preserve_unmanaged is true, unknown keys/tables already present in the
+    existing config are retained.
+    """
+    managed = _managed_config_dict(config)
+    data: dict[str, object] = managed
+    if preserve_unmanaged and path.exists():
+        existing = tomllib.loads(path.read_text())
+        if isinstance(existing, dict):
+            data = _merge_preserving_unmanaged_fields(existing, managed)
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines))
+    path.write_text(_serialize_toml(data))

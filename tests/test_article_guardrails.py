@@ -85,7 +85,7 @@ def test_pre_coding_checks_fail_fast_before_agent_invocation(tmp_path: Path) -> 
     result = harness.run_session()
 
     assert result.success is False
-    assert "pre-coding check failed" in result.message.lower()
+    assert "pre-coding command failed" in result.message.lower()
     assert not (tmp_path / "agent_was_invoked.txt").exists()
 
 

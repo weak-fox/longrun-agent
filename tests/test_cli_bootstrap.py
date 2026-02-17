@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from longrun_agent.cli import (
@@ -147,6 +148,29 @@ def test_parse_goal_draft_accepts_json_code_block() -> None:
     assert draft.core_flows[0] == "Create board"
 
 
+def test_parse_goal_draft_accepts_users_flows_and_done_criteria_aliases() -> None:
+    raw = json.dumps(
+        {
+            "users": "QA operators",
+            "flows": ["Open case", "Review case", "Close case", "Export case"],
+            "constraints": ["Keep existing stack"],
+            "done criteria": "Primary flow succeeds and checks stay green",
+            "feature_target": "27",
+        }
+    )
+    draft = _parse_goal_draft(
+        raw_output=raw,
+        goal="Improve case handling",
+        default_feature_target=40,
+    )
+
+    assert draft.primary_users == "QA operators"
+    assert draft.core_flows == ["Open case", "Review case", "Close case", "Export case"]
+    assert draft.constraints == ["Keep existing stack"]
+    assert draft.done_criteria == "Primary flow succeeds and checks stay green"
+    assert draft.feature_target == 27
+
+
 def test_run_bootstrap_guided_keeps_previous_draft_when_regeneration_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -185,3 +209,26 @@ def test_run_bootstrap_guided_keeps_previous_draft_when_regeneration_fails(
     spec_text = _spec_path(project_dir).read_text()
     assert "Build kanban app" in spec_text
     assert "Main workflow works" in spec_text
+
+
+def test_run_bootstrap_uses_configured_project_and_state_dirs_when_config_exists(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "external.toml"
+    configured_project_dir = tmp_path / "configured-project"
+    configured_state_dir = tmp_path / "configured-state"
+
+    config_path.write_text(
+        f"""[harness]
+project_dir = "{configured_project_dir.as_posix()}"
+state_dir = "{configured_state_dir.as_posix()}"
+"""
+    )
+
+    code = run_bootstrap(config_path, project_dir=None, guided=False)
+
+    assert code == 0
+    assert configured_project_dir.is_dir()
+    assert (configured_state_dir / "sessions").is_dir()
+    assert (configured_state_dir / "artifacts").is_dir()
+    assert (configured_state_dir / "artifacts" / "app_spec.txt").is_file()

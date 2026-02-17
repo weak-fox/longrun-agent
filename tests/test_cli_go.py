@@ -37,6 +37,7 @@ def test_parser_accepts_go_command_arguments() -> None:
     assert args.brainstorm_rounds == 3
     assert args.non_interactive is True
     assert args.yes is True
+    assert args.continue_on_failure is True
 
 
 def test_run_go_non_interactive_runs_goal_setup_and_loop(tmp_path: Path, monkeypatch) -> None:
@@ -55,6 +56,7 @@ def test_run_go_non_interactive_runs_goal_setup_and_loop(tmp_path: Path, monkeyp
     def _fake_run_loop(
         _config_path: Path,
         max_sessions: int | None,
+        continue_on_failure: bool = False,
         backend: str | None = None,
         profile: str | None = None,
         backend_model: str | None = None,
@@ -62,6 +64,7 @@ def test_run_go_non_interactive_runs_goal_setup_and_loop(tmp_path: Path, monkeyp
     ) -> int:
         captured["run_loop"] = {
             "max_sessions": max_sessions,
+            "continue_on_failure": continue_on_failure,
             "backend": backend,
             "profile": profile,
             "backend_model": backend_model,
@@ -95,6 +98,7 @@ def test_run_go_non_interactive_runs_goal_setup_and_loop(tmp_path: Path, monkeyp
     run_loop_args = captured["run_loop"]
     assert isinstance(run_loop_args, dict)
     assert run_loop_args["max_sessions"] == 7
+    assert run_loop_args["continue_on_failure"] is True
 
     config = load_config(config_path)
     assert config.project_dir == project_dir.resolve()
@@ -203,21 +207,11 @@ def test_run_go_runs_first_time_setup_when_config_missing_and_interactive(
     assert first_time["project_dir"] == project_dir
 
 
-def test_resolve_config_path_uses_external_default_when_local_missing(tmp_path: Path, monkeypatch) -> None:
+def test_resolve_config_path_uses_local_default_when_local_missing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     local_default = Path("longrun-agent.toml")
-    project_dir = tmp_path / "project"
-    project_dir.mkdir(parents=True)
-    fake_home = tmp_path / "home"
-    fake_home.mkdir(parents=True)
-
-    monkeypatch.setattr("longrun_agent.cli.Path.home", lambda: fake_home)
-
-    resolved = _resolve_config_path(local_default, project_dir_hint=project_dir)
-
-    assert resolved.parent == fake_home / ".longrun-agent" / "configs"
-    assert resolved.name.startswith("project-")
-    assert resolved.suffix == ".toml"
+    resolved = _resolve_config_path(local_default, project_dir_hint=tmp_path / "project")
+    assert resolved == local_default
 
 
 def test_resolve_config_path_prefers_local_default_when_file_exists(

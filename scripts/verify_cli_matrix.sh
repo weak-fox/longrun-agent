@@ -8,7 +8,7 @@ set -euo pipefail
 # - bootstrap/configure/run-session/run-loop/status/go happy paths
 # - critical gate/config behaviors (commit/progress/repair/clean-git/max-progress limits)
 # - runtime override propagation (backend_model/model_reasoning_effort)
-# - default external config path separation when local config is absent
+# - default local config path behavior when local config is absent
 #
 # Notes:
 # - This script intentionally uses isolated temp directories and a fake agent backend.
@@ -673,7 +673,7 @@ PYCODE
   ok "claude layered reading prompt output"
 }
 
-verify_run_loop_and_external_config_path() {
+verify_run_loop_and_local_config_path() {
   # run-loop clean success
   local p13="$WORK_ROOT/project-loop-success"
   local c13="$WORK_ROOT/loop-success.toml"
@@ -695,21 +695,20 @@ EOF
   expect_contains "$out13" "All features passing. Loop stopped cleanly." "run-loop clean stop"
   ok "run-loop success path"
 
-  # default external config path when local config is absent
+  # default local config path when local config is absent
   local p14="$WORK_ROOT/project-config-separation"
-  local fake_home="$WORK_ROOT/fake-home"
-  mkdir -p "$p14" "$fake_home"
+  mkdir -p "$p14"
   local out14
   out14=$(
     cd "$p14"
-    HOME="$fake_home" "$LR_BIN" configure --non-interactive --project-dir "$p14"
+    "$LR_BIN" configure --non-interactive --project-dir "$p14"
   )
   local cfg_path
   cfg_path="$(echo "$out14" | awk '/Updated config:/ {print $3}')"
   [[ -n "$cfg_path" ]] || fail "cannot parse config path from configure output"
-  expect_contains "$cfg_path" "$fake_home/.longrun-agent/configs/" "external default config path"
-  [[ ! -f "$p14/longrun-agent.toml" ]] || fail "local config should not be created"
-  ok "external default config path separation"
+  expect_contains "$cfg_path" "longrun-agent.toml" "local default config path"
+  [[ -f "$p14/longrun-agent.toml" ]] || fail "local config should be created"
+  ok "local default config path behavior"
 }
 
 verify_existing_codebase_task_generation() {
@@ -767,7 +766,7 @@ main() {
   verify_gates_and_limits
   verify_runtime_overrides_and_go
   verify_layered_reading_output_for_claude_profile
-  verify_run_loop_and_external_config_path
+  verify_run_loop_and_local_config_path
   verify_existing_codebase_task_generation
   ok "CLI/config verification matrix passed"
 }

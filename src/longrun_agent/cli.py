@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shlex
@@ -67,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument(
         "--project-dir",
         type=Path,
-        default=Path("."),
+        default=None,
         help="Project directory where harness state should live",
     )
     bootstrap.add_argument(
@@ -158,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Maximum number of sessions to run (default: 20)",
+    )
+    go.add_argument(
+        "--continue-on-failure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Continue loop when a session fails (default: true)",
     )
     go.add_argument(
         "--backend",
@@ -451,33 +456,90 @@ def _normalize_text_list(value: object, *, fallback: list[str]) -> list[str]:
     return result or fallback
 
 
+def _normalize_goal_draft_key(key: object) -> str:
+    return str(key).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _get_goal_draft_value(
+    data: dict,
+    normalized_data: dict[str, object],
+    keys: Sequence[str],
+    default: object,
+) -> object:
+    for key in keys:
+        if key in data:
+            return data[key]
+        normalized_key = _normalize_goal_draft_key(key)
+        if normalized_key in normalized_data:
+            return normalized_data[normalized_key]
+    return default
+
+
 def _parse_goal_draft(raw_output: str, goal: str, default_feature_target: int) -> GuidedGoalDraft:
     data = _extract_json_object(raw_output)
+    normalized_data = {_normalize_goal_draft_key(key): value for key, value in data.items()}
 
-    primary_users = str(data.get("primary_users", "Individuals and small teams")).strip()
+    primary_users = str(
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("primary_users", "users", "primary users"),
+            default="Individuals and small teams",
+        )
+    ).strip()
     if not primary_users:
         primary_users = "Individuals and small teams"
 
     core_flows = _normalize_text_list(
-        data.get("core_flows"),
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("core_flows", "flows", "core flows"),
+            default=None,
+        ),
         fallback=["Create item", "Edit item", "Complete item", "Search item"],
     )
     constraints = _normalize_text_list(
-        data.get("constraints"),
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("constraints",),
+            default=None,
+        ),
         fallback=["Reuse existing stack", "Keep dependencies minimal"],
     )
-    assumptions = _normalize_text_list(data.get("assumptions"), fallback=[])
+    assumptions = _normalize_text_list(
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("assumptions",),
+            default=None,
+        ),
+        fallback=[],
+    )
 
     done_criteria = str(
-        data.get(
-            "done_criteria",
-            "A new user can complete the core flow, and verification commands pass",
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=(
+                "done_criteria",
+                "done criteria",
+                "definition_of_done",
+                "definition of done",
+            ),
+            default="A new user can complete the core flow, and verification commands pass",
         )
     ).strip()
     if not done_criteria:
         done_criteria = "A new user can complete the core flow, and verification commands pass"
 
-    target_raw = data.get("feature_target", default_feature_target)
+    target_raw = _get_goal_draft_value(
+        data,
+        normalized_data,
+        keys=("feature_target", "feature target"),
+        default=default_feature_target,
+    )
     try:
         feature_target = int(target_raw)
     except (TypeError, ValueError):
@@ -966,25 +1028,15 @@ def _validate_project_python_environment(
 
 
 def _default_state_dir_for_project(project_dir: Path) -> Path:
-    project_key = hashlib.sha1(str(project_dir.resolve()).encode("utf-8")).hexdigest()[:10]
-    project_name = project_dir.name or "project"
-    return Path.home() / ".longrun-agent" / "state" / f"{project_name}-{project_key}"
-
-
-def _default_external_config_path(project_dir: Path) -> Path:
-    project_key = hashlib.sha1(str(project_dir.resolve()).encode("utf-8")).hexdigest()[:10]
-    project_name = project_dir.name or "project"
-    return Path.home() / ".longrun-agent" / "configs" / f"{project_name}-{project_key}.toml"
+    return project_dir.resolve() / ".longrun"
 
 
 def _resolve_config_path(config_path: Path, project_dir_hint: Path | None = None) -> Path:
+    del project_dir_hint
     default_path = Path(DEFAULT_CONFIG_FILENAME)
     if config_path != default_path:
         return config_path
-    if default_path.exists():
-        return default_path
-    hint = project_dir_hint.resolve() if project_dir_hint is not None else Path.cwd().resolve()
-    return _default_external_config_path(hint)
+    return default_path
 
 
 def _run_first_time_setup_for_go(config_path: Path, project_dir: Path | None = None) -> int:
@@ -1055,10 +1107,13 @@ def _apply_model_to_codex_command(command: list[str], model: str) -> list[str]:
     return updated
 
 
-def run_bootstrap(config_path: Path, project_dir: Path, guided: bool = False) -> int:
-    write_default_config(config_path, project_dir=project_dir.resolve())
+def run_bootstrap(config_path: Path, project_dir: Path | None, guided: bool = False) -> int:
+    default_project_dir = project_dir.resolve() if project_dir is not None else None
+    write_default_config(config_path, project_dir=default_project_dir)
     config = load_config(config_path)
-    config.project_dir = project_dir.resolve()
+    config.project_dir = (
+        project_dir.resolve() if project_dir is not None else config.project_dir.resolve()
+    )
     Harness(config).bootstrap()
     if guided:
         if not sys.stdin.isatty():
@@ -1183,6 +1238,7 @@ def run_go(
     config_path: Path,
     goal: str | None = None,
     max_sessions: int | None = 20,
+    continue_on_failure: bool = True,
     backend: str | None = None,
     profile: str | None = None,
     backend_model: str | None = None,
@@ -1268,6 +1324,7 @@ def run_go(
     return run_loop(
         config_path,
         max_sessions,
+        continue_on_failure=continue_on_failure,
         backend=backend,
         profile=profile,
         backend_model=backend_model,
@@ -1446,7 +1503,7 @@ def run_configure(
     if config.backend_name == "codex_cli" and backend_model is not None:
         config.agent_command = _apply_model_to_codex_command(config.agent_command, config.backend_model)
 
-    save_config(config_path, config)
+    save_config(config_path, config, preserve_unmanaged=True)
     print(f"Updated config: {config_path}")
     print(
         f"backend={config.backend_name} profile={config.profile} "
@@ -1494,6 +1551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=resolved_config_path,
             goal=args.goal,
             max_sessions=args.max_sessions,
+            continue_on_failure=args.continue_on_failure,
             backend=args.backend,
             profile=args.profile,
             backend_model=args.backend_model,
