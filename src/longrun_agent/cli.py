@@ -32,6 +32,7 @@ from .runtime.context_guidance import (
     build_instruction_and_layered_reading_guidance,
     instruction_file_for_backend,
 )
+from .self_improve import analyze_recent_sessions, build_recommendations, render_plan_markdown
 
 BACKEND_CHOICES = ("codex_cli", "claude_sdk")
 PROFILE_CHOICES = ("default", "article")
@@ -234,6 +235,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print status as JSON",
+    )
+
+    self_improve = subparsers.add_parser(
+        "self-improve",
+        help="Analyze recent sessions and propose/apply safe self-improvement steps",
+    )
+    self_improve.add_argument(
+        "--window",
+        type=int,
+        default=20,
+        help="How many recent sessions to analyze (default: 20)",
+    )
+    self_improve.add_argument(
+        "--apply",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply safe automatic tuning when recommended (default: true)",
     )
 
     simulate_pr = subparsers.add_parser(
@@ -1369,6 +1387,59 @@ def run_status(config_path: Path, as_json: bool) -> int:
     return 0
 
 
+def run_self_improve(
+    *,
+    config_path: Path,
+    window: int,
+    apply: bool,
+) -> int:
+    if window <= 0:
+        print("--window must be a positive integer", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    harness = Harness(config)
+    harness.bootstrap()
+
+    report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+    recommendations = build_recommendations(
+        report,
+        repair_on_verification_failure=config.repair_on_verification_failure,
+    )
+
+    applied_actions: list[str] = []
+    if apply:
+        for recommendation in recommendations:
+            if (
+                recommendation.auto_apply
+                and recommendation.config_field == "repair_on_verification_failure"
+                and bool(recommendation.config_value) is True
+                and not config.repair_on_verification_failure
+            ):
+                config.repair_on_verification_failure = True
+                applied_actions.append(
+                    "Set gates.repair_on_verification_failure = true "
+                    "(triggered by verification_commands_pass failures)"
+                )
+
+    if applied_actions:
+        save_config(config_path, config, preserve_unmanaged=True)
+
+    plan_text = render_plan_markdown(
+        report=report,
+        recommendations=recommendations,
+        applied_actions=applied_actions,
+    )
+    harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = harness.artifacts_dir / "self-improvement-plan.md"
+    plan_path.write_text(plan_text)
+
+    print(f"sessions_analyzed={report.session_count} failures={report.failure_count}")
+    print(f"recommendations={len(recommendations)} applied_actions={len(applied_actions)}")
+    print(f"plan={plan_path}")
+    return 0
+
+
 def run_simulate_pr(
     *,
     repository_language: str,
@@ -1567,6 +1638,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "status":
         return run_status(resolved_config_path, args.json)
+
+    if args.command == "self-improve":
+        return run_self_improve(
+            config_path=resolved_config_path,
+            window=args.window,
+            apply=args.apply,
+        )
 
     if args.command == "configure":
         return run_configure(
