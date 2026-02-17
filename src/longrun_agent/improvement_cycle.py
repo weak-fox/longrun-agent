@@ -11,6 +11,7 @@ from .self_improve import SelfImproveReport
 
 @dataclass(slots=True)
 class SourceReference:
+    source_id: str
     name: str
     url: str
     rationale: str
@@ -18,31 +19,40 @@ class SourceReference:
 
 ARCHITECTURE_SOURCES: list[SourceReference] = [
     SourceReference(
+        source_id="dora_metrics",
         name="DORA Metrics",
         url="https://dora.dev/guides/dora-metrics/",
         rationale="Use operational outcomes as the north-star for process improvement.",
     ),
     SourceReference(
+        source_id="sre_error_budget",
         name="Google SRE Error Budget Policy",
         url="https://sre.google/workbook/error-budget-policy/",
         rationale="Stop feature acceleration when reliability budgets are exceeded.",
     ),
     SourceReference(
+        source_id="sre_postmortem",
         name="Google SRE Postmortem Culture",
         url="https://sre.google/sre-book/postmortem-culture/",
         rationale="Turn repeated failures into tracked improvement actions.",
     ),
     SourceReference(
+        source_id="openai_agent_evals",
         name="OpenAI Agent Evals",
         url="https://platform.openai.com/docs/guides/agent-evals",
         rationale="Use reproducible eval windows to compare strategy changes.",
     ),
     SourceReference(
+        source_id="opentelemetry_logs",
         name="OpenTelemetry Logs",
         url="https://opentelemetry.io/docs/specs/otel/logs/",
         rationale="Keep execution telemetry structured and correlated across sessions.",
     ),
 ]
+
+_SOURCE_BY_ID: dict[str, SourceReference] = {
+    item.source_id: item for item in ARCHITECTURE_SOURCES
+}
 
 
 @dataclass(slots=True)
@@ -77,6 +87,7 @@ class Hypothesis:
     hypothesis_id: str
     statement: str
     expected_outcome: str
+    source_ids: list[str]
 
 
 @dataclass(slots=True)
@@ -87,12 +98,36 @@ class ExperimentPlan:
     actions: list[str]
     success_criteria: list[str]
     rollback_criteria: list[str]
+    source_ids: list[str]
 
 
 def _safe_rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _normalize_source_ids(source_ids: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for source_id in source_ids:
+        if source_id not in _SOURCE_BY_ID:
+            continue
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        result.append(source_id)
+    return result
+
+
+def _render_source_links(source_ids: list[str]) -> str:
+    links: list[str] = []
+    for source_id in source_ids:
+        source = _SOURCE_BY_ID.get(source_id)
+        if source is None:
+            continue
+        links.append(f"[{source.name}]({source.url})")
+    return ", ".join(links) if links else "none"
 
 
 def evaluate_budget_gate(
@@ -173,6 +208,9 @@ def build_hypotheses(diagnosis: Diagnosis) -> list[Hypothesis]:
                     f"current count={count}."
                 ),
                 expected_outcome="Lower failure_rate and fewer remediation reports in next window.",
+                source_ids=_normalize_source_ids(
+                    ["sre_postmortem", "openai_agent_evals", "opentelemetry_logs"]
+                ),
             )
         )
 
@@ -185,6 +223,9 @@ def build_hypotheses(diagnosis: Diagnosis) -> list[Hypothesis]:
                     "will reduce no-progress coding sessions."
                 ),
                 expected_outcome="no_progress_rate drops below threshold window-over-window.",
+                source_ids=_normalize_source_ids(
+                    ["dora_metrics", "openai_agent_evals"]
+                ),
             )
         )
 
@@ -197,6 +238,9 @@ def build_hypotheses(diagnosis: Diagnosis) -> list[Hypothesis]:
                     "and improve stability before adding feature scope."
                 ),
                 expected_outcome="failure_rate trends down and hold decisions become less frequent.",
+                source_ids=_normalize_source_ids(
+                    ["sre_error_budget", "dora_metrics"]
+                ),
             )
         )
 
@@ -206,6 +250,7 @@ def build_hypotheses(diagnosis: Diagnosis) -> list[Hypothesis]:
                 hypothesis_id="h0-continue",
                 statement="Current process is stable enough to continue with the same strategy.",
                 expected_outcome="Metrics remain within targets over the next window.",
+                source_ids=_normalize_source_ids(["dora_metrics"]),
             )
         )
 
@@ -218,6 +263,9 @@ def build_experiment_plans(
 ) -> list[ExperimentPlan]:
     plans: list[ExperimentPlan] = []
     for index, hypothesis in enumerate(hypotheses, start=1):
+        plan_source_ids = _normalize_source_ids(
+            hypothesis.source_ids + ["openai_agent_evals", "sre_error_budget"]
+        )
         plans.append(
             ExperimentPlan(
                 experiment_id=f"exp-{index:02d}",
@@ -236,6 +284,7 @@ def build_experiment_plans(
                     "Two consecutive windows with degraded failure_rate.",
                     "Primary bottleneck gate count increases after rollout.",
                 ],
+                source_ids=plan_source_ids,
             )
         )
     return plans
@@ -285,7 +334,8 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
     hypothesis_lines = "\n".join(
         [
             f"{index}. `{item['hypothesis_id']}` - {item['statement']}\n"
-            f"   expected: {item['expected_outcome']}"
+            f"   expected: {item['expected_outcome']}\n"
+            f"   sources: {_render_source_links(item.get('source_ids', []))}"
             for index, item in enumerate(hypotheses, start=1)
         ]
     )
@@ -293,12 +343,16 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
         [
             f"{index}. `{item['experiment_id']}` ({item['hypothesis_id']})\n"
             f"   budget_sessions: {item['budget_sessions']}\n"
-            f"   success: {', '.join(item['success_criteria'])}"
+            f"   success: {', '.join(item['success_criteria'])}\n"
+            f"   sources: {_render_source_links(item.get('source_ids', []))}"
             for index, item in enumerate(plans, start=1)
         ]
     )
     source_lines = "\n".join(
-        [f"- [{item['name']}]({item['url']}): {item['rationale']}" for item in sources]
+        [
+            f"- `{item['source_id']}` [{item['name']}]({item['url']}): {item['rationale']}"
+            for item in sources
+        ]
     )
 
     return (

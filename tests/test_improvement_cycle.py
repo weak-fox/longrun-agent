@@ -118,10 +118,19 @@ def test_run_improvement_cycle_writes_artifacts_with_source_links(tmp_path: Path
     payload = json.loads(json_path.read_text())
     assert payload["diagnosis"]["session_count"] == 2
     assert payload["budget_gate"]["status"] == "promote"
+    known_source_ids = {source["source_id"] for source in payload["architecture_sources"]}
+    for hypothesis in payload["hypotheses"]:
+        assert hypothesis["source_ids"]
+        assert set(hypothesis["source_ids"]).issubset(known_source_ids)
+    for plan in payload["experiment_plans"]:
+        assert plan["source_ids"]
+        assert set(plan["source_ids"]).issubset(known_source_ids)
 
     md_text = md_path.read_text()
     assert "Architecture Sources" in md_text
+    assert "sources:" in md_text
     for source in ARCHITECTURE_SOURCES:
+        assert source.source_id in md_text
         assert source.url in md_text
 
 
