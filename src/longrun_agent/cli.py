@@ -274,44 +274,82 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply safe automatic tuning when recommended (default: true)",
     )
 
+    def _add_improvement_cycle_args(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--window",
+            type=int,
+            default=20,
+            help="How many recent sessions to analyze (default: 20)",
+        )
+        command_parser.add_argument(
+            "--max-failure-rate",
+            type=float,
+            default=0.10,
+            help="Budget target for failure_rate (default: 0.10)",
+        )
+        command_parser.add_argument(
+            "--max-no-progress-rate",
+            type=float,
+            default=0.25,
+            help="Budget target for no_progress_rate (default: 0.25)",
+        )
+        command_parser.add_argument(
+            "--min-sessions",
+            type=int,
+            default=10,
+            help="Minimum sessions required before budget decision (default: 10)",
+        )
+        command_parser.add_argument(
+            "--auto-bootstrap",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help=(
+                "Automatically run sampling sessions when session window is below min-sessions "
+                "(default: true)"
+            ),
+        )
+        command_parser.add_argument(
+            "--bootstrap-sessions",
+            type=int,
+            default=None,
+            help=(
+                "Max sessions to run for automatic sampling; default is min-sessions gap"
+            ),
+        )
+        command_parser.add_argument(
+            "--auto-research",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Automatically run topic-based research when evidence is insufficient (default: true)",
+        )
+        command_parser.add_argument(
+            "--topic",
+            type=str,
+            default=None,
+            help="Research topic override for auto research in improvement-cycle",
+        )
+        command_parser.add_argument(
+            "--enforce-budget",
+            action="store_true",
+            help="Exit non-zero when budget gate status is not promote",
+        )
+        command_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Print cycle payload as JSON",
+        )
+
     improvement_cycle = subparsers.add_parser(
         "improvement-cycle",
         help="Run control-plane improvement cycle (diagnose, plan, budget-gate, evaluate)",
     )
-    improvement_cycle.add_argument(
-        "--window",
-        type=int,
-        default=20,
-        help="How many recent sessions to analyze (default: 20)",
+    _add_improvement_cycle_args(improvement_cycle)
+
+    run_cycle = subparsers.add_parser(
+        "run-cycle",
+        help="Alias for improvement-cycle with the same full automation behavior",
     )
-    improvement_cycle.add_argument(
-        "--max-failure-rate",
-        type=float,
-        default=0.10,
-        help="Budget target for failure_rate (default: 0.10)",
-    )
-    improvement_cycle.add_argument(
-        "--max-no-progress-rate",
-        type=float,
-        default=0.25,
-        help="Budget target for no_progress_rate (default: 0.25)",
-    )
-    improvement_cycle.add_argument(
-        "--min-sessions",
-        type=int,
-        default=10,
-        help="Minimum sessions required before budget decision (default: 10)",
-    )
-    improvement_cycle.add_argument(
-        "--enforce-budget",
-        action="store_true",
-        help="Exit non-zero when budget gate status is not promote",
-    )
-    improvement_cycle.add_argument(
-        "--json",
-        action="store_true",
-        help="Print cycle payload as JSON",
-    )
+    _add_improvement_cycle_args(run_cycle)
 
     improvement_research = subparsers.add_parser(
         "improvement-research",
@@ -1746,6 +1784,10 @@ def run_improvement_cycle(
     max_failure_rate: float,
     max_no_progress_rate: float,
     min_sessions: int,
+    auto_bootstrap: bool,
+    bootstrap_sessions: int | None,
+    auto_research: bool,
+    topic: str | None,
     enforce_budget: bool,
     as_json: bool,
 ) -> int:
@@ -1761,12 +1803,60 @@ def run_improvement_cycle(
     if not (0.0 <= max_no_progress_rate <= 1.0):
         print("--max-no-progress-rate must be in [0, 1]", file=sys.stderr)
         return 2
+    if bootstrap_sessions is not None and bootstrap_sessions <= 0:
+        print("--bootstrap-sessions must be a positive integer when set", file=sys.stderr)
+        return 2
 
     config = load_config(config_path)
     harness = Harness(config)
     harness.bootstrap()
 
     report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+    orchestration: dict[str, Any] = {
+        "auto_bootstrap": {
+            "enabled": auto_bootstrap,
+            "attempted": False,
+            "requested_sessions": 0,
+            "sampled_sessions": 0,
+            "sampled_failures": 0,
+            "error": "",
+        },
+        "auto_research": {
+            "enabled": auto_research,
+            "attempted": False,
+            "topic": "",
+            "sources_added_estimate": 0,
+            "claims_added_estimate": 0,
+            "error": "",
+        },
+    }
+
+    if auto_bootstrap and report.session_count < min_sessions:
+        requested = (
+            bootstrap_sessions
+            if bootstrap_sessions is not None
+            else max(min_sessions - report.session_count, 0)
+        )
+        if requested > 0:
+            orchestration["auto_bootstrap"]["attempted"] = True
+            orchestration["auto_bootstrap"]["requested_sessions"] = requested
+            try:
+                sampling_config = load_config(config_path)
+                sampling_config.auto_continue_delay_seconds = 0
+                sampling_harness = Harness(sampling_config)
+                sampling_harness.bootstrap()
+                results = sampling_harness.run_loop(
+                    max_sessions=requested,
+                    continue_on_failure=True,
+                )
+                orchestration["auto_bootstrap"]["sampled_sessions"] = len(results)
+                orchestration["auto_bootstrap"]["sampled_failures"] = sum(
+                    1 for item in results if not item.success
+                )
+            except Exception as exc:
+                orchestration["auto_bootstrap"]["error"] = str(exc)
+        report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+
     targets = ImprovementTargets(
         max_failure_rate=max_failure_rate,
         max_no_progress_rate=max_no_progress_rate,
@@ -1777,11 +1867,68 @@ def run_improvement_cycle(
     research_evidence = load_research_evidence(research_path, bootstrap_if_missing=True)
     memory_path = memory_file_path(harness.artifacts_dir)
     cycle_memory = load_cycle_memory(memory_path)
+
+    topic_value = (topic or "").strip()
+    if not topic_value:
+        topic_value = (
+            "How to improve autonomous coding harness reliability and reduce "
+            "no-progress sessions with evidence-driven experiments"
+        )
+
+    if auto_research and not research_evidence.get("claims"):
+        orchestration["auto_research"]["attempted"] = True
+        orchestration["auto_research"]["topic"] = topic_value
+        try:
+            auto_sources, auto_claims = _run_auto_improvement_research(
+                config=config,
+                topic=topic_value,
+                max_sources=6,
+                max_claims=12,
+                source_type="community",
+            )
+            research_evidence = add_research_bundle(
+                path=research_path,
+                sources=[dict(item) for item in auto_sources],
+                claims=[dict(item) for item in auto_claims],
+                default_source_type="community",
+            )
+            orchestration["auto_research"]["sources_added_estimate"] = len(auto_sources)
+            orchestration["auto_research"]["claims_added_estimate"] = len(auto_claims)
+        except Exception as exc:
+            orchestration["auto_research"]["error"] = str(exc)
+
     selected_research_claims = select_research_claims_for_diagnosis(
         research_evidence,
         diagnosis,
         memory=cycle_memory,
     )
+    if auto_research and not selected_research_claims:
+        orchestration["auto_research"]["attempted"] = True
+        orchestration["auto_research"]["topic"] = topic_value
+        try:
+            auto_sources, auto_claims = _run_auto_improvement_research(
+                config=config,
+                topic=topic_value,
+                max_sources=6,
+                max_claims=12,
+                source_type="community",
+            )
+            research_evidence = add_research_bundle(
+                path=research_path,
+                sources=[dict(item) for item in auto_sources],
+                claims=[dict(item) for item in auto_claims],
+                default_source_type="community",
+            )
+            orchestration["auto_research"]["sources_added_estimate"] += len(auto_sources)
+            orchestration["auto_research"]["claims_added_estimate"] += len(auto_claims)
+            selected_research_claims = select_research_claims_for_diagnosis(
+                research_evidence,
+                diagnosis,
+                memory=cycle_memory,
+            )
+        except Exception as exc:
+            orchestration["auto_research"]["error"] = str(exc)
+
     budget_gate = evaluate_budget_gate(
         session_count=report.session_count,
         failure_count=report.failure_count,
@@ -1828,6 +1975,7 @@ def run_improvement_cycle(
         "recent_cycles": updated_memory.get("cycles", [])[-5:],
         "claim_usage": updated_memory.get("claim_usage", {}),
     }
+    payload["orchestration"] = orchestration
 
     harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
     json_path = harness.artifacts_dir / "improvement-cycle.json"
@@ -1839,6 +1987,19 @@ def run_improvement_cycle(
         print(json.dumps(payload, indent=2))
     else:
         print(f"sessions_analyzed={report.session_count}")
+        if orchestration["auto_bootstrap"]["attempted"]:
+            print(
+                "auto_bootstrap="
+                f"sessions_requested:{orchestration['auto_bootstrap']['requested_sessions']} "
+                f"sampled:{orchestration['auto_bootstrap']['sampled_sessions']} "
+                f"failures:{orchestration['auto_bootstrap']['sampled_failures']}"
+            )
+        if orchestration["auto_research"]["attempted"]:
+            print(
+                "auto_research="
+                f"sources_added~:{orchestration['auto_research']['sources_added_estimate']} "
+                f"claims_added~:{orchestration['auto_research']['claims_added_estimate']}"
+            )
         print(
             f"budget_gate={budget_gate.status} "
             f"failure_rate={budget_gate.failure_rate:.3f} "
@@ -2153,13 +2314,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             apply=args.apply,
         )
 
-    if args.command == "improvement-cycle":
+    if args.command in {"improvement-cycle", "run-cycle"}:
         return run_improvement_cycle(
             config_path=resolved_config_path,
             window=args.window,
             max_failure_rate=args.max_failure_rate,
             max_no_progress_rate=args.max_no_progress_rate,
             min_sessions=args.min_sessions,
+            auto_bootstrap=args.auto_bootstrap,
+            bootstrap_sessions=args.bootstrap_sessions,
+            auto_research=args.auto_research,
+            topic=args.topic,
             enforce_budget=args.enforce_budget,
             as_json=args.json,
         )

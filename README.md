@@ -28,7 +28,8 @@ longrun-agent run-session [--backend ... --profile ... --backend-model ... --mod
 longrun-agent run-loop [--max-sessions ... --continue-on-failure --backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
 longrun-agent status [--json]
 longrun-agent self-improve [--window 20] [--apply|--no-apply]
-longrun-agent improvement-cycle [--window 20] [--max-failure-rate 0.10] [--max-no-progress-rate 0.25] [--min-sessions 10] [--enforce-budget] [--json]
+longrun-agent improvement-cycle [--window 20] [--min-sessions 10] [--auto-bootstrap] [--bootstrap-sessions N] [--auto-research] [--topic "..."] [--enforce-budget] [--json]
+longrun-agent run-cycle [same args as improvement-cycle]
 longrun-agent improvement-research [--list] [--topic "..."] [--max-sources 6] [--max-claims 12]
 ```
 
@@ -234,6 +235,12 @@ longrun-agent self-improve --window 20
 longrun-agent improvement-cycle --window 20 --min-sessions 10
 ```
 
+`run-cycle` 是等价别名：
+
+```bash
+longrun-agent run-cycle --window 20 --min-sessions 10
+```
+
 产物：
 - `.longrun/artifacts/improvement-cycle.json`
 - `.longrun/artifacts/improvement-cycle.md`
@@ -260,6 +267,9 @@ longrun-agent improvement-research \
 
 说明：
 - `improvement-cycle` 会先读取 `.longrun/artifacts/improvement-evidence.json`
+- `improvement-cycle` 默认会自动补全通路：
+  - 会话不足时自动采样（`--auto-bootstrap`）
+  - 证据不足时自动调研（`--auto-research`）
 - Hypotheses/Experiment Plans 必须绑定 `evidence_claim_ids` 与 `source_ids`
 - `improvement-research --topic` 会调用当前 backend 自动调研并提取 sources/claims 入库
 - 证据不足时会被 budget gate 标记为 `hold`

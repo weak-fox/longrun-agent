@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from longrun_agent.cli import (
     build_parser,
@@ -102,6 +103,15 @@ def test_parser_accepts_improvement_cycle_arguments() -> None:
     assert args.max_no_progress_rate == 0.2
     assert args.min_sessions == 12
     assert args.enforce_budget is True
+    assert args.auto_bootstrap is True
+    assert args.auto_research is True
+
+
+def test_parser_accepts_run_cycle_alias() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["run-cycle", "--window", "5"])
+    assert args.command == "run-cycle"
+    assert args.window == 5
 
 
 def test_parser_accepts_improvement_research_arguments() -> None:
@@ -165,6 +175,10 @@ def test_run_improvement_cycle_writes_artifacts_with_source_links(tmp_path: Path
         max_failure_rate=0.5,
         max_no_progress_rate=1.0,
         min_sessions=1,
+        auto_bootstrap=False,
+        bootstrap_sessions=None,
+        auto_research=False,
+        topic=None,
         enforce_budget=False,
         as_json=False,
     )
@@ -215,6 +229,10 @@ def test_run_improvement_cycle_enforce_budget_returns_nonzero_on_hold(tmp_path: 
         max_failure_rate=0.2,
         max_no_progress_rate=0.5,
         min_sessions=1,
+        auto_bootstrap=False,
+        bootstrap_sessions=None,
+        auto_research=False,
+        topic=None,
         enforce_budget=True,
         as_json=True,
     )
@@ -240,6 +258,10 @@ def test_run_improvement_cycle_holds_when_research_missing(tmp_path: Path) -> No
         max_failure_rate=0.5,
         max_no_progress_rate=1.0,
         min_sessions=1,
+        auto_bootstrap=False,
+        bootstrap_sessions=None,
+        auto_research=False,
+        topic=None,
         enforce_budget=True,
         as_json=False,
     )
@@ -365,6 +387,10 @@ def test_run_improvement_cycle_records_memory_and_avoids_same_claim_set(tmp_path
         max_failure_rate=0.5,
         max_no_progress_rate=1.0,
         min_sessions=1,
+        auto_bootstrap=False,
+        bootstrap_sessions=None,
+        auto_research=False,
+        topic=None,
         enforce_budget=False,
         as_json=False,
     )
@@ -379,6 +405,10 @@ def test_run_improvement_cycle_records_memory_and_avoids_same_claim_set(tmp_path
         max_failure_rate=0.5,
         max_no_progress_rate=1.0,
         min_sessions=1,
+        auto_bootstrap=False,
+        bootstrap_sessions=None,
+        auto_research=False,
+        topic=None,
         enforce_budget=False,
         as_json=False,
     )
@@ -391,3 +421,46 @@ def test_run_improvement_cycle_records_memory_and_avoids_same_claim_set(tmp_path
     memory_payload = json.loads((artifacts_dir / "improvement-memory.json").read_text())
     assert len(memory_payload["cycles"]) >= 2
     assert memory_payload["claim_usage"]["lab_source-c1"]["count"] >= 1
+
+
+def test_run_improvement_cycle_auto_bootstraps_sessions_when_window_empty(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    write_default_config(config_path, project_dir=tmp_path)
+
+    def _fake_run_loop(self, max_sessions=None, continue_on_failure=False):
+        del max_sessions, continue_on_failure
+        _write_session(
+            self.state_dir,
+            session_id=1,
+            phase="coding",
+            success=True,
+            passing=1,
+            total=5,
+            progress_made=True,
+        )
+        return [SimpleNamespace(success=True)]
+
+    monkeypatch.setattr("longrun_agent.cli.Harness.run_loop", _fake_run_loop)
+
+    code = run_improvement_cycle(
+        config_path=config_path,
+        window=20,
+        max_failure_rate=0.5,
+        max_no_progress_rate=1.0,
+        min_sessions=1,
+        auto_bootstrap=True,
+        bootstrap_sessions=1,
+        auto_research=False,
+        topic=None,
+        enforce_budget=False,
+        as_json=False,
+    )
+
+    assert code == 0
+    payload = json.loads((tmp_path / ".longrun" / "artifacts" / "improvement-cycle.json").read_text())
+    assert payload["diagnosis"]["session_count"] == 1
+    assert payload["orchestration"]["auto_bootstrap"]["attempted"] is True
+    assert payload["orchestration"]["auto_bootstrap"]["sampled_sessions"] == 1
