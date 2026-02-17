@@ -237,6 +237,7 @@ longrun-agent improvement-cycle --window 20 --min-sessions 10
 产物：
 - `.longrun/artifacts/improvement-cycle.json`
 - `.longrun/artifacts/improvement-cycle.md`
+- `.longrun/artifacts/improvement-memory.json`
 
 研究证据库（持续补充，本地优先）：
 
@@ -258,6 +259,8 @@ longrun-agent improvement-research \
 - `improvement-cycle` 会先读取 `.longrun/artifacts/improvement-evidence.json`
 - Hypotheses/Experiment Plans 必须绑定 `evidence_claim_ids` 与 `source_ids`
 - 证据不足时会被 budget gate 标记为 `hold`
+- `improvement-cycle` 会记录每轮已用 claims 到 `.longrun/artifacts/improvement-memory.json`
+- 下轮会优先选择未使用/少使用 claims，并尽量避免与上一轮完全相同的 claim 集合
 
 ## 一键模式（推荐新手）
 

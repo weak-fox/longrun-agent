@@ -50,6 +50,34 @@ def _write_remediation(state_dir: Path, *, session_id: int, gate_id: str) -> Non
     (remediation_dir / f"session-{session_id:04d}.json").write_text(json.dumps(payload, indent=2) + "\n")
 
 
+def _write_metrics_heavy_evidence(artifacts_dir: Path, claim_count: int = 12) -> None:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "sources": [
+            {
+                "source_id": "lab_source",
+                "name": "Lab Source",
+                "url": "https://example.com/lab",
+                "source_type": "community",
+                "rationale": "Synthetic evidence for rotation test",
+                "tags": ["metrics"],
+                "retrieved_at": "2026-02-17T00:00:00+00:00",
+            }
+        ],
+        "claims": [
+            {
+                "claim_id": f"lab_source-c{index}",
+                "source_id": "lab_source",
+                "statement": f"Synthetic metrics claim {index}",
+                "tags": ["metrics"],
+                "created_at": "2026-02-17T00:00:00+00:00",
+            }
+            for index in range(1, claim_count + 1)
+        ],
+    }
+    (artifacts_dir / "improvement-evidence.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+
 def test_parser_accepts_improvement_cycle_arguments() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -247,3 +275,46 @@ def test_run_improvement_research_adds_local_evidence_entry(tmp_path: Path) -> N
         and "Small batches reduce risk." in item["statement"]
         for item in payload["claims"]
     )
+
+
+def test_run_improvement_cycle_records_memory_and_avoids_same_claim_set(tmp_path: Path) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    write_default_config(config_path, project_dir=tmp_path)
+
+    state_dir = tmp_path / ".longrun"
+    artifacts_dir = state_dir / "artifacts"
+    _write_metrics_heavy_evidence(artifacts_dir, claim_count=12)
+    _write_session(state_dir, session_id=1, phase="coding", success=True, passing=1, total=5, progress_made=True)
+
+    first = run_improvement_cycle(
+        config_path=config_path,
+        window=20,
+        max_failure_rate=0.5,
+        max_no_progress_rate=1.0,
+        min_sessions=1,
+        enforce_budget=False,
+        as_json=False,
+    )
+    assert first == 0
+    first_payload = json.loads((artifacts_dir / "improvement-cycle.json").read_text())
+    first_claim_ids = [item["claim_id"] for item in first_payload["selected_research_claims"]]
+    assert len(first_claim_ids) == 8
+
+    second = run_improvement_cycle(
+        config_path=config_path,
+        window=20,
+        max_failure_rate=0.5,
+        max_no_progress_rate=1.0,
+        min_sessions=1,
+        enforce_budget=False,
+        as_json=False,
+    )
+    assert second == 0
+    second_payload = json.loads((artifacts_dir / "improvement-cycle.json").read_text())
+    second_claim_ids = [item["claim_id"] for item in second_payload["selected_research_claims"]]
+    assert second_claim_ids != first_claim_ids
+    assert set(second_claim_ids) - set(first_claim_ids)
+
+    memory_payload = json.loads((artifacts_dir / "improvement-memory.json").read_text())
+    assert len(memory_payload["cycles"]) >= 2
+    assert memory_payload["claim_usage"]["lab_source-c1"]["count"] >= 1

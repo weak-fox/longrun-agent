@@ -166,6 +166,114 @@ def evidence_file_path(artifacts_dir: Path) -> Path:
     return artifacts_dir / "improvement-evidence.json"
 
 
+def memory_file_path(artifacts_dir: Path) -> Path:
+    return artifacts_dir / "improvement-memory.json"
+
+
+def _seed_memory_payload() -> dict[str, Any]:
+    return {
+        "cycles": [],
+        "claim_usage": {},
+    }
+
+
+def _coerce_memory_payload(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return _seed_memory_payload()
+
+    cycles_raw = payload.get("cycles")
+    usage_raw = payload.get("claim_usage")
+    cycles: list[dict[str, Any]] = []
+    usage: dict[str, dict[str, Any]] = {}
+
+    if isinstance(cycles_raw, list):
+        for item in cycles_raw:
+            if not isinstance(item, dict):
+                continue
+            claim_ids = [
+                str(claim_id).strip()
+                for claim_id in item.get("selected_claim_ids", [])
+                if str(claim_id).strip()
+            ]
+            cycles.append(
+                {
+                    "generated_at": str(item.get("generated_at", "")).strip() or _now_iso(),
+                    "budget_gate_status": str(item.get("budget_gate_status", "")).strip() or "unknown",
+                    "primary_bottleneck": str(item.get("primary_bottleneck", "")).strip(),
+                    "selected_claim_ids": claim_ids,
+                    "hypothesis_ids": [
+                        str(hypothesis_id).strip()
+                        for hypothesis_id in item.get("hypothesis_ids", [])
+                        if str(hypothesis_id).strip()
+                    ],
+                }
+            )
+
+    if isinstance(usage_raw, dict):
+        for key, value in usage_raw.items():
+            claim_id = str(key).strip()
+            if not claim_id:
+                continue
+            if isinstance(value, dict):
+                usage[claim_id] = {
+                    "count": int(value.get("count", 0)),
+                    "last_used_at": str(value.get("last_used_at", "")).strip() or "",
+                }
+            else:
+                usage[claim_id] = {"count": int(value), "last_used_at": ""}
+
+    return {"cycles": cycles, "claim_usage": usage}
+
+
+def load_cycle_memory(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        payload = _seed_memory_payload()
+        save_cycle_memory(path, payload)
+        return payload
+    try:
+        raw = json.loads(path.read_text())
+    except Exception:
+        raw = _seed_memory_payload()
+    payload = _coerce_memory_payload(raw)
+    save_cycle_memory(path, payload)
+    return payload
+
+
+def save_cycle_memory(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def record_cycle_memory(
+    memory: dict[str, Any],
+    *,
+    generated_at: str,
+    budget_gate_status: str,
+    primary_bottleneck: str,
+    selected_claim_ids: list[str],
+    hypothesis_ids: list[str],
+) -> dict[str, Any]:
+    normalized = _coerce_memory_payload(memory)
+    usage = normalized["claim_usage"]
+    for claim_id in selected_claim_ids:
+        entry = usage.get(claim_id, {"count": 0, "last_used_at": ""})
+        entry["count"] = int(entry.get("count", 0)) + 1
+        entry["last_used_at"] = generated_at
+        usage[claim_id] = entry
+
+    normalized["cycles"].append(
+        {
+            "generated_at": generated_at,
+            "budget_gate_status": budget_gate_status,
+            "primary_bottleneck": primary_bottleneck,
+            "selected_claim_ids": list(selected_claim_ids),
+            "hypothesis_ids": list(hypothesis_ids),
+        }
+    )
+    normalized["cycles"] = normalized["cycles"][-200:]
+    return normalized
+
+
 def _seed_evidence_payload() -> dict[str, Any]:
     sources = [
         {
@@ -366,15 +474,48 @@ def _source_lookup(evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {item["source_id"]: item for item in evidence.get("sources", [])}
 
 
+def _memory_usage_count(memory: dict[str, Any], claim_id: str) -> int:
+    usage = memory.get("claim_usage", {})
+    if not isinstance(usage, dict):
+        return 0
+    raw_entry = usage.get(claim_id, {})
+    if isinstance(raw_entry, dict):
+        try:
+            return max(0, int(raw_entry.get("count", 0)))
+        except Exception:
+            return 0
+    try:
+        return max(0, int(raw_entry))
+    except Exception:
+        return 0
+
+
+def _last_cycle_claim_ids(memory: dict[str, Any]) -> set[str]:
+    cycles = memory.get("cycles", [])
+    if not isinstance(cycles, list) or not cycles:
+        return set()
+    last = cycles[-1]
+    if not isinstance(last, dict):
+        return set()
+    return {
+        str(item).strip()
+        for item in last.get("selected_claim_ids", [])
+        if str(item).strip()
+    }
+
+
 def select_research_claims_for_diagnosis(
     evidence: dict[str, Any],
     diagnosis: Diagnosis,
     *,
+    memory: dict[str, Any] | None = None,
     limit: int = 8,
 ) -> list[dict[str, Any]]:
     claims = [item for item in evidence.get("claims", []) if isinstance(item, dict)]
     if not claims:
         return []
+    memory_payload = _coerce_memory_payload(memory if memory is not None else _seed_memory_payload())
+    recent_claim_ids = _last_cycle_claim_ids(memory_payload)
 
     required_tags: set[str] = {"metrics"}
     if diagnosis.primary_bottleneck.startswith("gate:"):
@@ -387,17 +528,25 @@ def select_research_claims_for_diagnosis(
     sources = _source_lookup(evidence)
     scored: list[tuple[float, dict[str, Any]]] = []
     for claim in claims:
+        claim_id = str(claim.get("claim_id", "")).strip()
+        if not claim_id:
+            continue
         tags = set(_normalize_tags(claim.get("tags")))
         overlap = len(tags.intersection(required_tags))
         source = sources.get(str(claim.get("source_id", "")), {})
         source_type = str(source.get("source_type", "community"))
         source_bonus = 0.20 if source_type == "official" else 0.10 if source_type == "vendor" else 0.05
-        score = float(overlap) + source_bonus
+        base_score = float(overlap) + source_bonus
         if overlap == 0 and required_tags:
             continue
+        usage_count = _memory_usage_count(memory_payload, claim_id)
+        recency_penalty = 0.60 if claim_id in recent_claim_ids else 0.0
+        score = base_score - (0.30 * float(usage_count)) - recency_penalty
         enriched = dict(claim)
         enriched["tags"] = sorted(tags)
         enriched["source"] = source
+        enriched["usage_count"] = usage_count
+        enriched["used_in_last_cycle"] = claim_id in recent_claim_ids
         enriched["score"] = score
         scored.append((score, enriched))
 
@@ -408,12 +557,38 @@ def select_research_claims_for_diagnosis(
             item = dict(claim)
             item["source"] = source
             item["tags"] = _normalize_tags(item.get("tags"))
+            claim_id = str(item.get("claim_id", "")).strip()
+            item["usage_count"] = _memory_usage_count(memory_payload, claim_id)
+            item["used_in_last_cycle"] = claim_id in recent_claim_ids
             item["score"] = 0.0
             fallback.append(item)
         return fallback
 
-    scored.sort(key=lambda item: (-item[0], str(item[1].get("claim_id", ""))))
-    return [item for _, item in scored[:limit]]
+    scored.sort(
+        key=lambda item: (
+            int(item[1].get("usage_count", 0)),
+            bool(item[1].get("used_in_last_cycle", False)),
+            -item[0],
+            str(item[1].get("claim_id", "")),
+        )
+    )
+    selected = [item for _, item in scored[:limit]]
+
+    # Extra anti-repeat guard: avoid selecting exactly the same claim set as last cycle
+    # when alternative candidates exist.
+    selected_ids = {
+        str(item.get("claim_id", "")).strip() for item in selected if str(item.get("claim_id", "")).strip()
+    }
+    if selected_ids and selected_ids == recent_claim_ids:
+        alternatives = [
+            item
+            for _, item in scored[limit:]
+            if str(item.get("claim_id", "")).strip() not in recent_claim_ids
+        ]
+        if alternatives and selected:
+            selected[-1] = alternatives[0]
+
+    return selected
 
 
 def _source_ids_from_claim_ids(
@@ -697,7 +872,13 @@ def build_cycle_payload(
     experiment_plans: list[ExperimentPlan],
     research_evidence: dict[str, Any],
     selected_research_claims: list[dict[str, Any]],
+    cycle_memory: dict[str, Any],
 ) -> dict[str, Any]:
+    recent_cycles = cycle_memory.get("cycles", [])
+    if isinstance(recent_cycles, list):
+        recent_cycles = recent_cycles[-5:]
+    else:
+        recent_cycles = []
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "targets": asdict(targets),
@@ -715,6 +896,14 @@ def build_cycle_payload(
         "experiment_plans": [asdict(item) for item in experiment_plans],
         "selected_research_claims": selected_research_claims,
         "research_sources": research_evidence.get("sources", []),
+        "selection_policy": {
+            "prefer_low_usage_claims": True,
+            "avoid_last_cycle_claim_set": True,
+        },
+        "memory": {
+            "recent_cycles": recent_cycles,
+            "claim_usage": cycle_memory.get("claim_usage", {}),
+        },
     }
 
 
@@ -725,6 +914,7 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
     plans = payload["experiment_plans"]
     selected_claims = payload.get("selected_research_claims", [])
     sources = payload.get("research_sources", [])
+    memory = payload.get("memory", {})
     sources_by_id = {item["source_id"]: item for item in sources if isinstance(item, dict)}
 
     top_gates = diagnosis.get("top_gate_failures", [])
@@ -736,7 +926,9 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
     if selected_claims:
         evidence_lines = "\n".join(
             [
-                f"- `{item['claim_id']}` ({item['source_id']}): {item['statement']}"
+                f"- `{item['claim_id']}` ({item['source_id']}): {item['statement']} "
+                f"(usage_count={item.get('usage_count', 0)}, "
+                f"used_last_cycle={item.get('used_in_last_cycle', False)})"
                 for item in selected_claims
             ]
         )
@@ -769,6 +961,18 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
             for item in sources
         ]
     )
+    recent_cycles = memory.get("recent_cycles", [])
+    if isinstance(recent_cycles, list) and recent_cycles:
+        history_lines = "\n".join(
+            [
+                f"- {item.get('generated_at', '')} status={item.get('budget_gate_status', '')} "
+                f"claims={', '.join(item.get('selected_claim_ids', [])) or 'none'}"
+                for item in recent_cycles
+                if isinstance(item, dict)
+            ]
+        )
+    else:
+        history_lines = "- none"
 
     return (
         "# Improvement Cycle Report\n\n"
@@ -791,5 +995,7 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
         "## Experiment Plans\n"
         f"{plan_lines}\n\n"
         "## Research Sources\n"
-        f"{source_lines}\n"
+        f"{source_lines}\n\n"
+        "## Memory History\n"
+        f"{history_lines}\n"
     )

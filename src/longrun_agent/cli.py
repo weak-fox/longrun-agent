@@ -44,6 +44,10 @@ from .improvement_cycle import (
     evidence_file_path,
     evaluate_budget_gate,
     load_research_evidence,
+    load_cycle_memory,
+    memory_file_path,
+    record_cycle_memory,
+    save_cycle_memory,
     render_cycle_markdown,
     select_research_claims_for_diagnosis,
 )
@@ -1583,9 +1587,12 @@ def run_improvement_cycle(
     diagnosis = build_diagnosis(report)
     research_path = evidence_file_path(harness.artifacts_dir)
     research_evidence = load_research_evidence(research_path, bootstrap_if_missing=True)
+    memory_path = memory_file_path(harness.artifacts_dir)
+    cycle_memory = load_cycle_memory(memory_path)
     selected_research_claims = select_research_claims_for_diagnosis(
         research_evidence,
         diagnosis,
+        memory=cycle_memory,
     )
     budget_gate = evaluate_budget_gate(
         session_count=report.session_count,
@@ -1609,7 +1616,30 @@ def run_improvement_cycle(
         experiment_plans=experiment_plans,
         research_evidence=research_evidence,
         selected_research_claims=selected_research_claims,
+        cycle_memory=cycle_memory,
     )
+
+    updated_memory = record_cycle_memory(
+        cycle_memory,
+        generated_at=str(payload.get("generated_at", "")),
+        budget_gate_status=str(payload.get("budget_gate", {}).get("status", "")),
+        primary_bottleneck=str(payload.get("diagnosis", {}).get("primary_bottleneck", "")),
+        selected_claim_ids=[
+            str(item.get("claim_id", "")).strip()
+            for item in selected_research_claims
+            if str(item.get("claim_id", "")).strip()
+        ],
+        hypothesis_ids=[
+            str(item.get("hypothesis_id", "")).strip()
+            for item in payload.get("hypotheses", [])
+            if isinstance(item, dict) and str(item.get("hypothesis_id", "")).strip()
+        ],
+    )
+    save_cycle_memory(memory_path, updated_memory)
+    payload["memory"] = {
+        "recent_cycles": updated_memory.get("cycles", [])[-5:],
+        "claim_usage": updated_memory.get("claim_usage", {}),
+    }
 
     harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
     json_path = harness.artifacts_dir / "improvement-cycle.json"
