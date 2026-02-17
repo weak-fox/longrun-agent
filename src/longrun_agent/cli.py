@@ -33,13 +33,19 @@ from .runtime.context_guidance import (
     instruction_file_for_backend,
 )
 from .improvement_cycle import (
+    SOURCE_TYPE_CHOICES,
     ImprovementTargets,
+    add_research_evidence,
     build_cycle_payload,
     build_diagnosis,
     build_experiment_plans,
     build_hypotheses,
+    enforce_research_requirement,
+    evidence_file_path,
     evaluate_budget_gate,
+    load_research_evidence,
     render_cycle_markdown,
+    select_research_claims_for_diagnosis,
 )
 from .self_improve import analyze_recent_sessions, build_recommendations, render_plan_markdown
 
@@ -300,6 +306,59 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print cycle payload as JSON",
+    )
+
+    improvement_research = subparsers.add_parser(
+        "improvement-research",
+        help="Manage local research evidence base used by improvement-cycle",
+    )
+    improvement_research.add_argument(
+        "--list",
+        action="store_true",
+        help="List current evidence sources and claims",
+    )
+    improvement_research.add_argument(
+        "--source-id",
+        type=str,
+        default=None,
+        help="Stable source id for adding/updating a research source",
+    )
+    improvement_research.add_argument(
+        "--title",
+        type=str,
+        default=None,
+        help="Source title when adding evidence",
+    )
+    improvement_research.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Source URL when adding evidence",
+    )
+    improvement_research.add_argument(
+        "--source-type",
+        type=str,
+        choices=SOURCE_TYPE_CHOICES,
+        default="community",
+        help="Source type classification (official/vendor/community)",
+    )
+    improvement_research.add_argument(
+        "--claim",
+        action="append",
+        default=None,
+        help="Evidence claim statement; repeatable",
+    )
+    improvement_research.add_argument(
+        "--tags",
+        type=str,
+        default="",
+        help="Comma-separated tags for source and claims",
+    )
+    improvement_research.add_argument(
+        "--notes",
+        type=str,
+        default="",
+        help="Optional source rationale/notes",
     )
 
     simulate_pr = subparsers.add_parser(
@@ -1522,6 +1581,12 @@ def run_improvement_cycle(
         min_sessions=min_sessions,
     )
     diagnosis = build_diagnosis(report)
+    research_path = evidence_file_path(harness.artifacts_dir)
+    research_evidence = load_research_evidence(research_path, bootstrap_if_missing=True)
+    selected_research_claims = select_research_claims_for_diagnosis(
+        research_evidence,
+        diagnosis,
+    )
     budget_gate = evaluate_budget_gate(
         session_count=report.session_count,
         failure_count=report.failure_count,
@@ -1529,8 +1594,12 @@ def run_improvement_cycle(
         no_progress_sessions=report.no_progress_sessions,
         targets=targets,
     )
-    hypotheses = build_hypotheses(diagnosis)
-    experiment_plans = build_experiment_plans(hypotheses, targets)
+    budget_gate = enforce_research_requirement(
+        budget_gate,
+        selected_research_claims,
+    )
+    hypotheses = build_hypotheses(diagnosis, selected_research_claims)
+    experiment_plans = build_experiment_plans(hypotheses, targets, selected_research_claims)
     payload = build_cycle_payload(
         report=report,
         targets=targets,
@@ -1538,6 +1607,8 @@ def run_improvement_cycle(
         budget_gate=budget_gate,
         hypotheses=hypotheses,
         experiment_plans=experiment_plans,
+        research_evidence=research_evidence,
+        selected_research_claims=selected_research_claims,
     )
 
     harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -1559,6 +1630,65 @@ def run_improvement_cycle(
 
     if enforce_budget and budget_gate.status != "promote":
         return 1
+    return 0
+
+
+def run_improvement_research(
+    *,
+    config_path: Path,
+    list_only: bool,
+    source_id: str | None,
+    title: str | None,
+    url: str | None,
+    source_type: str,
+    claims: list[str] | None,
+    tags: str,
+    notes: str,
+) -> int:
+    config = load_config(config_path)
+    harness = Harness(config)
+    harness.bootstrap()
+
+    research_path = evidence_file_path(harness.artifacts_dir)
+    payload = load_research_evidence(research_path, bootstrap_if_missing=True)
+
+    adding_requested = any(
+        value is not None and str(value).strip()
+        for value in (source_id, title, url)
+    ) or bool(claims)
+    if adding_requested:
+        if not (source_id and title and url):
+            print(
+                "--source-id/--title/--url are required when adding evidence",
+                file=sys.stderr,
+            )
+            return 2
+        if not claims:
+            print("--claim is required when adding evidence", file=sys.stderr)
+            return 2
+        payload = add_research_evidence(
+            path=research_path,
+            source_id=source_id,
+            title=title,
+            url=url,
+            source_type=source_type,
+            claims=claims,
+            tags=[item for item in tags.split(",") if item.strip()],
+            notes=notes,
+        )
+
+    if list_only or not adding_requested:
+        print(f"evidence_path={research_path}")
+        print(f"sources={len(payload.get('sources', []))} claims={len(payload.get('claims', []))}")
+        for source in payload.get("sources", []):
+            print(
+                f"- {source.get('source_id')} ({source.get('source_type')}): "
+                f"{source.get('name')} -> {source.get('url')}"
+            )
+    else:
+        print(f"updated={research_path}")
+        print(f"sources={len(payload.get('sources', []))} claims={len(payload.get('claims', []))}")
+
     return 0
 
 
@@ -1777,6 +1907,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_sessions=args.min_sessions,
             enforce_budget=args.enforce_budget,
             as_json=args.json,
+        )
+
+    if args.command == "improvement-research":
+        return run_improvement_research(
+            config_path=resolved_config_path,
+            list_only=args.list,
+            source_id=args.source_id,
+            title=args.title,
+            url=args.url,
+            source_type=args.source_type,
+            claims=args.claim,
+            tags=args.tags,
+            notes=args.notes,
         )
 
     if args.command == "configure":
