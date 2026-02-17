@@ -32,6 +32,15 @@ from .runtime.context_guidance import (
     build_instruction_and_layered_reading_guidance,
     instruction_file_for_backend,
 )
+from .improvement_cycle import (
+    ImprovementTargets,
+    build_cycle_payload,
+    build_diagnosis,
+    build_experiment_plans,
+    build_hypotheses,
+    evaluate_budget_gate,
+    render_cycle_markdown,
+)
 from .self_improve import analyze_recent_sessions, build_recommendations, render_plan_markdown
 
 BACKEND_CHOICES = ("codex_cli", "claude_sdk")
@@ -252,6 +261,45 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Apply safe automatic tuning when recommended (default: true)",
+    )
+
+    improvement_cycle = subparsers.add_parser(
+        "improvement-cycle",
+        help="Run control-plane improvement cycle (diagnose, plan, budget-gate, evaluate)",
+    )
+    improvement_cycle.add_argument(
+        "--window",
+        type=int,
+        default=20,
+        help="How many recent sessions to analyze (default: 20)",
+    )
+    improvement_cycle.add_argument(
+        "--max-failure-rate",
+        type=float,
+        default=0.10,
+        help="Budget target for failure_rate (default: 0.10)",
+    )
+    improvement_cycle.add_argument(
+        "--max-no-progress-rate",
+        type=float,
+        default=0.25,
+        help="Budget target for no_progress_rate (default: 0.25)",
+    )
+    improvement_cycle.add_argument(
+        "--min-sessions",
+        type=int,
+        default=10,
+        help="Minimum sessions required before budget decision (default: 10)",
+    )
+    improvement_cycle.add_argument(
+        "--enforce-budget",
+        action="store_true",
+        help="Exit non-zero when budget gate status is not promote",
+    )
+    improvement_cycle.add_argument(
+        "--json",
+        action="store_true",
+        help="Print cycle payload as JSON",
     )
 
     simulate_pr = subparsers.add_parser(
@@ -1440,6 +1488,80 @@ def run_self_improve(
     return 0
 
 
+def run_improvement_cycle(
+    *,
+    config_path: Path,
+    window: int,
+    max_failure_rate: float,
+    max_no_progress_rate: float,
+    min_sessions: int,
+    enforce_budget: bool,
+    as_json: bool,
+) -> int:
+    if window <= 0:
+        print("--window must be a positive integer", file=sys.stderr)
+        return 2
+    if min_sessions <= 0:
+        print("--min-sessions must be a positive integer", file=sys.stderr)
+        return 2
+    if not (0.0 <= max_failure_rate <= 1.0):
+        print("--max-failure-rate must be in [0, 1]", file=sys.stderr)
+        return 2
+    if not (0.0 <= max_no_progress_rate <= 1.0):
+        print("--max-no-progress-rate must be in [0, 1]", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    harness = Harness(config)
+    harness.bootstrap()
+
+    report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+    targets = ImprovementTargets(
+        max_failure_rate=max_failure_rate,
+        max_no_progress_rate=max_no_progress_rate,
+        min_sessions=min_sessions,
+    )
+    diagnosis = build_diagnosis(report)
+    budget_gate = evaluate_budget_gate(
+        session_count=report.session_count,
+        failure_count=report.failure_count,
+        coding_sessions=report.coding_sessions,
+        no_progress_sessions=report.no_progress_sessions,
+        targets=targets,
+    )
+    hypotheses = build_hypotheses(diagnosis)
+    experiment_plans = build_experiment_plans(hypotheses, targets)
+    payload = build_cycle_payload(
+        report=report,
+        targets=targets,
+        diagnosis=diagnosis,
+        budget_gate=budget_gate,
+        hypotheses=hypotheses,
+        experiment_plans=experiment_plans,
+    )
+
+    harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    json_path = harness.artifacts_dir / "improvement-cycle.json"
+    md_path = harness.artifacts_dir / "improvement-cycle.md"
+    json_path.write_text(json.dumps(payload, indent=2) + "\n")
+    md_path.write_text(render_cycle_markdown(payload))
+
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"sessions_analyzed={report.session_count}")
+        print(
+            f"budget_gate={budget_gate.status} "
+            f"failure_rate={budget_gate.failure_rate:.3f} "
+            f"no_progress_rate={budget_gate.no_progress_rate:.3f}"
+        )
+        print(f"artifacts={json_path}, {md_path}")
+
+    if enforce_budget and budget_gate.status != "promote":
+        return 1
+    return 0
+
+
 def run_simulate_pr(
     *,
     repository_language: str,
@@ -1644,6 +1766,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=resolved_config_path,
             window=args.window,
             apply=args.apply,
+        )
+
+    if args.command == "improvement-cycle":
+        return run_improvement_cycle(
+            config_path=resolved_config_path,
+            window=args.window,
+            max_failure_rate=args.max_failure_rate,
+            max_no_progress_rate=args.max_no_progress_rate,
+            min_sessions=args.min_sessions,
+            enforce_budget=args.enforce_budget,
+            as_json=args.json,
         )
 
     if args.command == "configure":

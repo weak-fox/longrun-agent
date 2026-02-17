@@ -28,6 +28,7 @@ longrun-agent run-session [--backend ... --profile ... --backend-model ... --mod
 longrun-agent run-loop [--max-sessions ... --continue-on-failure --backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
 longrun-agent status [--json]
 longrun-agent self-improve [--window 20] [--apply|--no-apply]
+longrun-agent improvement-cycle [--window 20] [--max-failure-rate 0.10] [--max-no-progress-rate 0.25] [--min-sessions 10] [--enforce-budget] [--json]
 ```
 
 ## 自动验证脚本
@@ -225,6 +226,16 @@ longrun-agent self-improve --window 20
 默认自动调参（可 `--no-apply` 关闭）：
 - 若窗口内出现 `verification_commands_pass` 且当前未开启，则自动设置
   `gates.repair_on_verification_failure = true`
+
+改进控制面循环（架构化地改进 longrun-agent 本身）：
+
+```bash
+longrun-agent improvement-cycle --window 20 --min-sessions 10
+```
+
+产物：
+- `.longrun/artifacts/improvement-cycle.json`
+- `.longrun/artifacts/improvement-cycle.md`
 
 ## 一键模式（推荐新手）
 
