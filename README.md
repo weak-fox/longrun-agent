@@ -78,6 +78,24 @@ Codex 沙箱说明：
 
 ## 快速开始（推荐路径）
 
+### Session 1 本地运行（当前仓库默认）
+
+```bash
+bash .longrun/artifacts/init.sh
+source .venv-longrun/bin/activate
+longrun-agent status
+```
+
+本轮初始化后，权威工件路径为：
+- `.longrun/artifacts/app_spec.txt`
+- `.longrun/artifacts/feature_list.json`
+- `.longrun/artifacts/claude-progress.txt`
+- `.longrun/artifacts/init.sh`
+
+关键不变量：
+- 后续 coding session 只允许修改 `.longrun/artifacts/feature_list.json` 中每个条目的 `passes` 字段。
+- 禁止修改 `category` / `description` / `steps` / 顺序 / 数量。
+
 ### 0) 本地初始化（推荐先执行）
 
 ```bash
