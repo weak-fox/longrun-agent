@@ -38,3 +38,10 @@ docs/anthropic-harness-notes.md
 task_plan.md
 findings.md
 progress.md
+
+# IDEs
+.idea/
+.vscode/
+.vscode-test/
+.fleet/
+.vs/
