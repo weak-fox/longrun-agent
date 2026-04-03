@@ -92,3 +92,31 @@ def test_prompt_provider_renders_authoritative_artifact_paths() -> None:
     assert ".longrun/artifacts/feature_list.json" in prompt
     assert ".longrun/artifacts/claude-progress.txt" in prompt
     assert ".longrun/artifacts/init.sh" in prompt
+
+
+def test_prompt_provider_does_not_duplicate_artifact_prefixes() -> None:
+    provider = PromptProvider(
+        profile="default",
+        backend_name="codex_cli",
+        app_spec_path=".longrun/artifacts/app_spec.txt",
+        feature_list_path=".longrun/artifacts/feature_list.json",
+        progress_path=".longrun/artifacts/claude-progress.txt",
+        init_script_path=".longrun/artifacts/init.sh",
+    )
+
+    coding = provider.build_coding_prompt(
+        app_spec="Build app",
+        feature_index=1,
+        feature={
+            "category": "functional",
+            "description": "Do thing",
+            "steps": ["a"],
+            "passes": False,
+        },
+        passing=0,
+        total=2,
+    )
+    initializer = provider.build_initializer_prompt(app_spec="Build app", feature_target=2)
+
+    assert ".longrun/artifacts/.longrun/artifacts/" not in coding
+    assert ".longrun/artifacts/.longrun/artifacts/" not in initializer

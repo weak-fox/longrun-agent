@@ -172,6 +172,62 @@ def test_run_session_short_circuits_when_all_features_pass(tmp_path: Path) -> No
     assert result.message == "All features already passing"
 
 
+def test_run_session_short_circuit_still_writes_prompt_artifact(tmp_path: Path) -> None:
+    artifact_dir = _artifact_dir(tmp_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
+    features = [
+        {
+            "category": "functional",
+            "description": "Feature A",
+            "steps": ["step 1"],
+            "passes": True,
+        }
+    ]
+    (artifact_dir / "feature_list.json").write_text(json.dumps(features, indent=2))
+
+    harness = Harness(
+        HarnessConfig(
+            project_dir=tmp_path,
+            agent_command=["bash", "-lc", "exit 99"],
+            verification_commands=[],
+            bearings_commands=[],
+            auto_continue_delay_seconds=0,
+        )
+    )
+
+    result = harness.run_session()
+    prompt_path = tmp_path / ".longrun" / "sessions" / "session-0001" / "prompt.md"
+
+    assert result.success is True
+    assert result.message == "All features already passing"
+    assert prompt_path.exists()
+
+
+def test_run_session_feature_list_load_failure_writes_prompt_artifact(tmp_path: Path) -> None:
+    artifact_dir = _artifact_dir(tmp_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "app_spec.txt").write_text("Build a basic task app")
+    (artifact_dir / "feature_list.json").write_text("{}")
+
+    harness = Harness(
+        HarnessConfig(
+            project_dir=tmp_path,
+            agent_command=["bash", "-lc", "exit 99"],
+            verification_commands=[],
+            bearings_commands=[],
+            auto_continue_delay_seconds=0,
+        )
+    )
+
+    result = harness.run_session()
+    prompt_path = tmp_path / ".longrun" / "sessions" / "session-0001" / "prompt.md"
+
+    assert result.success is False
+    assert "cannot be loaded" in result.message
+    assert prompt_path.exists()
+
+
 def test_harness_uses_custom_state_dir_when_configured(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True)

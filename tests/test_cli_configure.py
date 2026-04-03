@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 from longrun_agent.cli import build_parser, run_configure
 from longrun_agent.config import load_config
@@ -72,3 +73,73 @@ def test_run_configure_updates_config_file_non_interactive(tmp_path: Path) -> No
     assert loaded.commit_required is True
     assert loaded.progress_update_required is True
     assert loaded.repair_on_verification_failure is True
+
+
+def test_run_configure_preserves_unrelated_config_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "longrun-agent.toml"
+    config_path.write_text(
+        """[agent]
+command = ["echo", "ok"]
+timeout_seconds = 3600
+custom_agent_flag = "keep"
+
+[runtime]
+backend = "codex_cli"
+profile = "default"
+backend_model = "gpt-5.2-codex"
+model_reasoning_effort = ""
+custom_runtime_flag = "keep"
+
+[backends.codex_cli]
+command = ["echo", "ok"]
+model = "gpt-5.2-codex"
+timeout_seconds = 3600
+custom_codex_flag = "keep"
+
+[backends.claude_sdk]
+model = "claude-sonnet-4-5-20250929"
+custom_claude_flag = "keep"
+
+[gates]
+commit_required = false
+progress_update_required = false
+repair_on_verification_failure = false
+custom_gate_flag = "keep"
+
+[harness]
+project_dir = "."
+state_dir = ""
+artifacts_dir = ""
+auto_continue_delay_seconds = 3
+feature_target = 200
+max_no_progress_sessions = 5
+max_features_per_session = 3
+require_clean_git = false
+bearings_commands = ["pwd"]
+pre_coding_commands = []
+verification_commands = []
+custom_harness_flag = "keep"
+
+[custom]
+value = "keep"
+"""
+    )
+
+    code = run_configure(
+        config_path=config_path,
+        backend="claude_sdk",
+        profile="article",
+        backend_model="claude-opus-x",
+        commit_required=True,
+        non_interactive=True,
+    )
+
+    assert code == 0
+    parsed = tomllib.loads(config_path.read_text())
+    assert parsed["custom"]["value"] == "keep"
+    assert parsed["agent"]["custom_agent_flag"] == "keep"
+    assert parsed["runtime"]["custom_runtime_flag"] == "keep"
+    assert parsed["backends"]["codex_cli"]["custom_codex_flag"] == "keep"
+    assert parsed["backends"]["claude_sdk"]["custom_claude_flag"] == "keep"
+    assert parsed["gates"]["custom_gate_flag"] == "keep"
+    assert parsed["harness"]["custom_harness_flag"] == "keep"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from longrun_agent.article.prompts import get_coding_prompt, get_initializer_prompt
 from longrun_agent.feature_list import Feature
 from longrun_agent.prompts import build_coding_prompt, build_initializer_prompt
@@ -78,7 +80,12 @@ class PromptProvider:
         }
         remapped = prompt
         for source, target in replacements.items():
-            remapped = remapped.replace(source, target)
+            # Replace only standalone filename tokens (or backtick-wrapped tokens),
+            # never when they are already part of a larger path.
+            token_pattern = re.compile(
+                rf"(?<![A-Za-z0-9_./-]){re.escape(source)}(?![A-Za-z0-9_./-])"
+            )
+            remapped = token_pattern.sub(target, remapped)
         return remapped
 
     def _with_context_guidance(self, prompt: str) -> str:

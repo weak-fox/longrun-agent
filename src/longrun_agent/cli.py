@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+import math
 import json
 import os
 import shlex
@@ -32,6 +32,34 @@ from .runtime.contracts import AgentRunRequest
 from .runtime.context_guidance import (
     build_instruction_and_layered_reading_guidance,
     instruction_file_for_backend,
+)
+from .improvement_cycle import (
+    SOURCE_TYPE_CHOICES,
+    BudgetGateDecision,
+    Diagnosis,
+    ImprovementTargets,
+    add_research_bundle,
+    add_research_evidence,
+    build_cycle_payload,
+    build_diagnosis,
+    build_experiment_plans,
+    build_hypotheses,
+    enforce_research_requirement,
+    evidence_file_path,
+    evaluate_budget_gate,
+    load_research_evidence,
+    load_cycle_memory,
+    memory_file_path,
+    record_cycle_memory,
+    save_cycle_memory,
+    render_cycle_markdown,
+    select_research_claims_for_diagnosis,
+)
+from .self_improve import (
+    SelfImproveReport,
+    analyze_recent_sessions,
+    build_recommendations,
+    render_plan_markdown,
 )
 
 BACKEND_CHOICES = ("codex_cli", "claude_sdk")
@@ -67,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument(
         "--project-dir",
         type=Path,
-        default=Path("."),
+        default=None,
         help="Project directory where harness state should live",
     )
     bootstrap.add_argument(
@@ -160,6 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of sessions to run (default: 20)",
     )
     go.add_argument(
+        "--continue-on-failure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Continue loop when a session fails (default: true)",
+    )
+    go.add_argument(
         "--backend",
         type=str,
         choices=BACKEND_CHOICES,
@@ -229,6 +263,171 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print status as JSON",
+    )
+
+    self_improve = subparsers.add_parser(
+        "self-improve",
+        help="Analyze recent sessions and propose/apply safe self-improvement steps",
+    )
+    self_improve.add_argument(
+        "--window",
+        type=int,
+        default=20,
+        help="How many recent sessions to analyze (default: 20)",
+    )
+    self_improve.add_argument(
+        "--apply",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply safe automatic tuning when recommended (default: true)",
+    )
+
+    def _add_improvement_cycle_args(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--window",
+            type=int,
+            default=20,
+            help="How many recent sessions to analyze (default: 20)",
+        )
+        command_parser.add_argument(
+            "--max-failure-rate",
+            type=float,
+            default=0.10,
+            help="Budget target for failure_rate (default: 0.10)",
+        )
+        command_parser.add_argument(
+            "--max-no-progress-rate",
+            type=float,
+            default=0.25,
+            help="Budget target for no_progress_rate (default: 0.25)",
+        )
+        command_parser.add_argument(
+            "--min-sessions",
+            type=int,
+            default=10,
+            help="Minimum sessions required before budget decision (default: 10)",
+        )
+        command_parser.add_argument(
+            "--auto-bootstrap",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help=(
+                "Automatically run sampling sessions when session window is below min-sessions, "
+                "or when budget gate is hold on reliability metrics (default: true)"
+            ),
+        )
+        command_parser.add_argument(
+            "--bootstrap-sessions",
+            type=int,
+            default=None,
+            help=(
+                "Max sessions to run for automatic sampling; default is min-sessions gap"
+            ),
+        )
+        command_parser.add_argument(
+            "--auto-research",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Automatically run topic-based research when evidence is insufficient (default: true)",
+        )
+        command_parser.add_argument(
+            "--topic",
+            type=str,
+            default=None,
+            help="Research topic override for auto research in improvement-cycle",
+        )
+        command_parser.add_argument(
+            "--enforce-budget",
+            action="store_true",
+            help="Exit non-zero when budget gate status is not promote",
+        )
+        command_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Print cycle payload as JSON",
+        )
+
+    improvement_cycle = subparsers.add_parser(
+        "improvement-cycle",
+        help="Run control-plane improvement cycle (diagnose, plan, budget-gate, evaluate)",
+    )
+    _add_improvement_cycle_args(improvement_cycle)
+
+    run_cycle = subparsers.add_parser(
+        "run-cycle",
+        help="Alias for improvement-cycle with the same full automation behavior",
+    )
+    _add_improvement_cycle_args(run_cycle)
+
+    improvement_research = subparsers.add_parser(
+        "improvement-research",
+        help="Manage local research evidence base used by improvement-cycle",
+    )
+    improvement_research.add_argument(
+        "--list",
+        action="store_true",
+        help="List current evidence sources and claims",
+    )
+    improvement_research.add_argument(
+        "--topic",
+        type=str,
+        default=None,
+        help="Research topic for automatic evidence discovery (web + repo context)",
+    )
+    improvement_research.add_argument(
+        "--max-sources",
+        type=int,
+        default=6,
+        help="Maximum sources to collect in auto research mode (default: 6)",
+    )
+    improvement_research.add_argument(
+        "--max-claims",
+        type=int,
+        default=12,
+        help="Maximum claims to collect in auto research mode (default: 12)",
+    )
+    improvement_research.add_argument(
+        "--source-id",
+        type=str,
+        default=None,
+        help="Stable source id for adding/updating a research source",
+    )
+    improvement_research.add_argument(
+        "--title",
+        type=str,
+        default=None,
+        help="Source title when adding evidence",
+    )
+    improvement_research.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Source URL when adding evidence",
+    )
+    improvement_research.add_argument(
+        "--source-type",
+        type=str,
+        choices=SOURCE_TYPE_CHOICES,
+        default="community",
+        help="Source type classification (official/vendor/community)",
+    )
+    improvement_research.add_argument(
+        "--claim",
+        action="append",
+        default=None,
+        help="Evidence claim statement; repeatable",
+    )
+    improvement_research.add_argument(
+        "--tags",
+        type=str,
+        default="",
+        help="Comma-separated tags for source and claims",
+    )
+    improvement_research.add_argument(
+        "--notes",
+        type=str,
+        default="",
+        help="Optional source rationale/notes",
     )
 
     simulate_pr = subparsers.add_parser(
@@ -440,6 +639,175 @@ def _extract_json_object(text: str) -> dict:
     return parsed
 
 
+def _build_improvement_research_prompt(
+    *,
+    topic: str,
+    max_sources: int,
+    max_claims: int,
+    backend_name: str,
+) -> str:
+    instruction_file = instruction_file_for_backend(backend_name)
+    guidance = build_instruction_and_layered_reading_guidance(backend_name)
+    return dedent(
+        f"""\
+        You are a research analyst for improving an autonomous coding harness.
+        Do focused web research and return evidence for this topic:
+
+        {topic}
+
+        Before research:
+        - Read `{instruction_file}` first if present.
+        - Use layered repo reading to anchor research in this repository's actual constraints.
+        {guidance}
+
+        Research requirements:
+        - Prefer high-signal sources: official docs/standards, vendor engineering docs, high-quality community references.
+        - Avoid duplicate sources and duplicate claims.
+        - Each claim must be actionable for process/architecture decisions in this repo.
+
+        Return ONLY valid JSON (no markdown, no code fences) with shape:
+        {{
+          "sources": [
+            {{
+              "title": "string",
+              "url": "https://...",
+              "source_type": "official|vendor|community",
+              "rationale": "why this source is relevant",
+              "tags": ["string"]
+            }}
+          ],
+          "claims": [
+            {{
+              "source_url": "https://...",
+              "statement": "single actionable claim",
+              "tags": ["string"]
+            }}
+          ]
+        }}
+
+        Limits:
+        - sources: at most {max_sources}
+        - claims: at most {max_claims}
+        """
+    ).strip()
+
+
+def _parse_improvement_research_bundle(
+    raw_output: str,
+    *,
+    max_sources: int,
+    max_claims: int,
+    default_source_type: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    data = _extract_json_object(raw_output)
+    raw_sources = data.get("sources", [])
+    raw_claims = data.get("claims", [])
+
+    sources: list[dict[str, object]] = []
+    if isinstance(raw_sources, list):
+        for item in raw_sources:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", item.get("name", ""))).strip()
+            url = str(item.get("url", "")).strip()
+            if not title or not url:
+                continue
+            source_type = str(item.get("source_type", default_source_type)).strip().lower()
+            if source_type not in SOURCE_TYPE_CHOICES:
+                source_type = default_source_type
+            tags = item.get("tags", [])
+            if not isinstance(tags, list):
+                tags = []
+            sources.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "source_type": source_type,
+                    "rationale": str(item.get("rationale", "")).strip(),
+                    "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+                }
+            )
+    sources = sources[:max_sources]
+
+    source_urls = {str(item["url"]) for item in sources}
+    claims: list[dict[str, object]] = []
+    if isinstance(raw_claims, list):
+        for item in raw_claims:
+            if not isinstance(item, dict):
+                continue
+            source_url = str(item.get("source_url", "")).strip()
+            statement = str(item.get("statement", "")).strip()
+            if not source_url or not statement:
+                continue
+            if source_urls and source_url not in source_urls:
+                continue
+            tags = item.get("tags", [])
+            if not isinstance(tags, list):
+                tags = []
+            claims.append(
+                {
+                    "source_url": source_url,
+                    "statement": statement,
+                    "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+                }
+            )
+    claims = claims[:max_claims]
+    return sources, claims
+
+
+def _run_auto_improvement_research(
+    *,
+    config,
+    topic: str,
+    max_sources: int,
+    max_claims: int,
+    source_type: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    research_dir = config.project_dir / ".longrun" / "improvement-research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = research_dir / "auto-research.prompt.md"
+    prompt_file.write_text(
+        _build_improvement_research_prompt(
+            topic=topic,
+            max_sources=max_sources,
+            max_claims=max_claims,
+            backend_name=config.backend_name,
+        )
+    )
+
+    backend = create_backend(
+        backend_name=config.backend_name,
+        project_dir=config.project_dir,
+        command_template=config.agent_command,
+        model=config.backend_model,
+    )
+    run_result = backend.run(
+        AgentRunRequest(
+            phase="initializer",
+            project_dir=config.project_dir,
+            prompt_file=prompt_file,
+            session_dir=research_dir,
+            timeout_seconds=min(config.agent_timeout_seconds, 900),
+            backend_model=config.backend_model,
+            model_reasoning_effort=config.model_reasoning_effort,
+        )
+    )
+    if run_result.timeout:
+        raise RuntimeError("auto research timed out")
+    if run_result.return_code not in {0, None}:
+        stderr = run_result.stderr_path.read_text().strip() if run_result.stderr_path.exists() else ""
+        raise RuntimeError(f"auto research failed (code={run_result.return_code}): {stderr}")
+    if not run_result.stdout_path.exists():
+        raise RuntimeError("auto research produced no stdout output")
+
+    return _parse_improvement_research_bundle(
+        run_result.stdout_path.read_text(),
+        max_sources=max_sources,
+        max_claims=max_claims,
+        default_source_type=source_type,
+    )
+
+
 def _normalize_text_list(value: object, *, fallback: list[str]) -> list[str]:
     if not isinstance(value, list):
         return fallback
@@ -451,33 +819,90 @@ def _normalize_text_list(value: object, *, fallback: list[str]) -> list[str]:
     return result or fallback
 
 
+def _normalize_goal_draft_key(key: object) -> str:
+    return str(key).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _get_goal_draft_value(
+    data: dict,
+    normalized_data: dict[str, object],
+    keys: Sequence[str],
+    default: object,
+) -> object:
+    for key in keys:
+        if key in data:
+            return data[key]
+        normalized_key = _normalize_goal_draft_key(key)
+        if normalized_key in normalized_data:
+            return normalized_data[normalized_key]
+    return default
+
+
 def _parse_goal_draft(raw_output: str, goal: str, default_feature_target: int) -> GuidedGoalDraft:
     data = _extract_json_object(raw_output)
+    normalized_data = {_normalize_goal_draft_key(key): value for key, value in data.items()}
 
-    primary_users = str(data.get("primary_users", "Individuals and small teams")).strip()
+    primary_users = str(
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("primary_users", "users", "primary users"),
+            default="Individuals and small teams",
+        )
+    ).strip()
     if not primary_users:
         primary_users = "Individuals and small teams"
 
     core_flows = _normalize_text_list(
-        data.get("core_flows"),
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("core_flows", "flows", "core flows"),
+            default=None,
+        ),
         fallback=["Create item", "Edit item", "Complete item", "Search item"],
     )
     constraints = _normalize_text_list(
-        data.get("constraints"),
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("constraints",),
+            default=None,
+        ),
         fallback=["Reuse existing stack", "Keep dependencies minimal"],
     )
-    assumptions = _normalize_text_list(data.get("assumptions"), fallback=[])
+    assumptions = _normalize_text_list(
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=("assumptions",),
+            default=None,
+        ),
+        fallback=[],
+    )
 
     done_criteria = str(
-        data.get(
-            "done_criteria",
-            "A new user can complete the core flow, and verification commands pass",
+        _get_goal_draft_value(
+            data,
+            normalized_data,
+            keys=(
+                "done_criteria",
+                "done criteria",
+                "definition_of_done",
+                "definition of done",
+            ),
+            default="A new user can complete the core flow, and verification commands pass",
         )
     ).strip()
     if not done_criteria:
         done_criteria = "A new user can complete the core flow, and verification commands pass"
 
-    target_raw = data.get("feature_target", default_feature_target)
+    target_raw = _get_goal_draft_value(
+        data,
+        normalized_data,
+        keys=("feature_target", "feature target"),
+        default=default_feature_target,
+    )
     try:
         feature_target = int(target_raw)
     except (TypeError, ValueError):
@@ -966,25 +1391,15 @@ def _validate_project_python_environment(
 
 
 def _default_state_dir_for_project(project_dir: Path) -> Path:
-    project_key = hashlib.sha1(str(project_dir.resolve()).encode("utf-8")).hexdigest()[:10]
-    project_name = project_dir.name or "project"
-    return Path.home() / ".longrun-agent" / "state" / f"{project_name}-{project_key}"
-
-
-def _default_external_config_path(project_dir: Path) -> Path:
-    project_key = hashlib.sha1(str(project_dir.resolve()).encode("utf-8")).hexdigest()[:10]
-    project_name = project_dir.name or "project"
-    return Path.home() / ".longrun-agent" / "configs" / f"{project_name}-{project_key}.toml"
+    return project_dir.resolve() / ".longrun"
 
 
 def _resolve_config_path(config_path: Path, project_dir_hint: Path | None = None) -> Path:
+    del project_dir_hint
     default_path = Path(DEFAULT_CONFIG_FILENAME)
     if config_path != default_path:
         return config_path
-    if default_path.exists():
-        return default_path
-    hint = project_dir_hint.resolve() if project_dir_hint is not None else Path.cwd().resolve()
-    return _default_external_config_path(hint)
+    return default_path
 
 
 def _run_first_time_setup_for_go(config_path: Path, project_dir: Path | None = None) -> int:
@@ -1055,10 +1470,13 @@ def _apply_model_to_codex_command(command: list[str], model: str) -> list[str]:
     return updated
 
 
-def run_bootstrap(config_path: Path, project_dir: Path, guided: bool = False) -> int:
-    write_default_config(config_path, project_dir=project_dir.resolve())
+def run_bootstrap(config_path: Path, project_dir: Path | None, guided: bool = False) -> int:
+    default_project_dir = project_dir.resolve() if project_dir is not None else None
+    write_default_config(config_path, project_dir=default_project_dir)
     config = load_config(config_path)
-    config.project_dir = project_dir.resolve()
+    config.project_dir = (
+        project_dir.resolve() if project_dir is not None else config.project_dir.resolve()
+    )
     Harness(config).bootstrap()
     if guided:
         if not sys.stdin.isatty():
@@ -1183,6 +1601,7 @@ def run_go(
     config_path: Path,
     goal: str | None = None,
     max_sessions: int | None = 20,
+    continue_on_failure: bool = True,
     backend: str | None = None,
     profile: str | None = None,
     backend_model: str | None = None,
@@ -1268,6 +1687,7 @@ def run_go(
     return run_loop(
         config_path,
         max_sessions,
+        continue_on_failure=continue_on_failure,
         backend=backend,
         profile=profile,
         backend_model=backend_model,
@@ -1308,6 +1728,509 @@ def run_status(config_path: Path, as_json: bool) -> int:
         print(f"lock: active pid={pid} started_at={started}")
     else:
         print("lock: none")
+
+    return 0
+
+
+def run_self_improve(
+    *,
+    config_path: Path,
+    window: int,
+    apply: bool,
+) -> int:
+    if window <= 0:
+        print("--window must be a positive integer", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    harness = Harness(config)
+    harness.bootstrap()
+
+    report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+    recommendations = build_recommendations(
+        report,
+        repair_on_verification_failure=config.repair_on_verification_failure,
+    )
+
+    applied_actions: list[str] = []
+    if apply:
+        for recommendation in recommendations:
+            if (
+                recommendation.auto_apply
+                and recommendation.config_field == "repair_on_verification_failure"
+                and bool(recommendation.config_value) is True
+                and not config.repair_on_verification_failure
+            ):
+                config.repair_on_verification_failure = True
+                applied_actions.append(
+                    "Set gates.repair_on_verification_failure = true "
+                    "(triggered by verification_commands_pass failures)"
+                )
+
+    if applied_actions:
+        save_config(config_path, config, preserve_unmanaged=True)
+
+    plan_text = render_plan_markdown(
+        report=report,
+        recommendations=recommendations,
+        applied_actions=applied_actions,
+    )
+    harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = harness.artifacts_dir / "self-improvement-plan.md"
+    plan_path.write_text(plan_text)
+
+    print(f"sessions_analyzed={report.session_count} failures={report.failure_count}")
+    print(f"recommendations={len(recommendations)} applied_actions={len(applied_actions)}")
+    print(f"plan={plan_path}")
+    return 0
+
+
+def run_improvement_cycle(
+    *,
+    config_path: Path,
+    window: int,
+    max_failure_rate: float,
+    max_no_progress_rate: float,
+    min_sessions: int,
+    auto_bootstrap: bool,
+    bootstrap_sessions: int | None,
+    auto_research: bool,
+    topic: str | None,
+    enforce_budget: bool,
+    as_json: bool,
+) -> int:
+    if window <= 0:
+        print("--window must be a positive integer", file=sys.stderr)
+        return 2
+    if min_sessions <= 0:
+        print("--min-sessions must be a positive integer", file=sys.stderr)
+        return 2
+    if not (0.0 <= max_failure_rate <= 1.0):
+        print("--max-failure-rate must be in [0, 1]", file=sys.stderr)
+        return 2
+    if not (0.0 <= max_no_progress_rate <= 1.0):
+        print("--max-no-progress-rate must be in [0, 1]", file=sys.stderr)
+        return 2
+    if bootstrap_sessions is not None and bootstrap_sessions <= 0:
+        print("--bootstrap-sessions must be a positive integer when set", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    harness = Harness(config)
+    harness.bootstrap()
+
+    report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+    orchestration: dict[str, Any] = {
+        "auto_bootstrap": {
+            "enabled": auto_bootstrap,
+            "attempted": False,
+            "reason": "",
+            "requested_sessions": 0,
+            "sampled_sessions": 0,
+            "sampled_failures": 0,
+            "error": "",
+        },
+        "auto_continue": {
+            "enabled": auto_bootstrap,
+            "attempted": False,
+            "reason": "",
+            "requested_sessions": 0,
+            "sampled_sessions": 0,
+            "sampled_failures": 0,
+            "error": "",
+            "post_budget_gate": "",
+        },
+        "auto_research": {
+            "enabled": auto_research,
+            "attempted": False,
+            "topic": "",
+            "sources_added_estimate": 0,
+            "claims_added_estimate": 0,
+            "error": "",
+        },
+    }
+
+    def _run_sampling_sessions(requested: int) -> tuple[int, int]:
+        sampling_config = load_config(config_path)
+        sampling_config.auto_continue_delay_seconds = 0
+        sampling_harness = Harness(sampling_config)
+        sampling_harness.bootstrap()
+        results = sampling_harness.run_loop(
+            max_sessions=requested,
+            continue_on_failure=True,
+        )
+        sampled_sessions = len(results)
+        sampled_failures = sum(1 for item in results if not item.success)
+        return sampled_sessions, sampled_failures
+
+    def _is_reliability_hold(decision: BudgetGateDecision) -> bool:
+        return any(
+            reason.startswith("failure_rate_exceeded")
+            or reason.startswith("no_progress_rate_exceeded")
+            for reason in decision.reasons
+        )
+
+    def _recommended_auto_continue_sessions(current_report: SelfImproveReport) -> int:
+        recommended = 1
+        hard_cap = max(window, min_sessions, 20)
+
+        if current_report.failure_count > 0:
+            if targets.max_failure_rate <= 0.0:
+                recommended = hard_cap
+            else:
+                required = math.ceil(
+                    (current_report.failure_count / targets.max_failure_rate)
+                    - current_report.session_count
+                )
+                recommended = max(recommended, required)
+
+        if current_report.no_progress_sessions > 0:
+            if targets.max_no_progress_rate <= 0.0:
+                recommended = hard_cap
+            else:
+                required = math.ceil(
+                    (current_report.no_progress_sessions / targets.max_no_progress_rate)
+                    - current_report.coding_sessions
+                )
+                recommended = max(recommended, required)
+
+        return max(1, min(recommended, hard_cap))
+
+    needs_session_count_bootstrap = report.session_count < min_sessions
+    needs_coding_signal_bootstrap = report.session_count > 0 and report.coding_sessions == 0
+    if auto_bootstrap and (needs_session_count_bootstrap or needs_coding_signal_bootstrap):
+        requested_default = max(min_sessions - report.session_count, 0)
+        if needs_coding_signal_bootstrap:
+            requested_default = max(requested_default, 3)
+        requested = bootstrap_sessions if bootstrap_sessions is not None else requested_default
+        requested = max(requested, 1)
+        if requested > 0:
+            orchestration["auto_bootstrap"]["attempted"] = True
+            orchestration["auto_bootstrap"]["reason"] = (
+                "insufficient_session_count"
+                if needs_session_count_bootstrap
+                else "no_coding_signal"
+            )
+            orchestration["auto_bootstrap"]["requested_sessions"] = requested
+            try:
+                sampled_sessions, sampled_failures = _run_sampling_sessions(requested)
+                orchestration["auto_bootstrap"]["sampled_sessions"] = sampled_sessions
+                orchestration["auto_bootstrap"]["sampled_failures"] = sampled_failures
+            except Exception as exc:
+                orchestration["auto_bootstrap"]["error"] = str(exc)
+        report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+
+    targets = ImprovementTargets(
+        max_failure_rate=max_failure_rate,
+        max_no_progress_rate=max_no_progress_rate,
+        min_sessions=min_sessions,
+    )
+    diagnosis = build_diagnosis(report)
+    research_path = evidence_file_path(harness.artifacts_dir)
+    research_evidence = load_research_evidence(research_path, bootstrap_if_missing=True)
+    memory_path = memory_file_path(harness.artifacts_dir)
+    cycle_memory = load_cycle_memory(memory_path)
+
+    topic_value = (topic or "").strip()
+    if not topic_value:
+        topic_value = (
+            "How to improve autonomous coding harness reliability and reduce "
+            "no-progress sessions with evidence-driven experiments"
+        )
+
+    def _select_claims_with_auto_research(
+        current_diagnosis: Diagnosis,
+        current_research_evidence: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if auto_research and not current_research_evidence.get("claims"):
+            orchestration["auto_research"]["attempted"] = True
+            orchestration["auto_research"]["topic"] = topic_value
+            try:
+                auto_sources, auto_claims = _run_auto_improvement_research(
+                    config=config,
+                    topic=topic_value,
+                    max_sources=6,
+                    max_claims=12,
+                    source_type="community",
+                )
+                current_research_evidence = add_research_bundle(
+                    path=research_path,
+                    sources=[dict(item) for item in auto_sources],
+                    claims=[dict(item) for item in auto_claims],
+                    default_source_type="community",
+                )
+                orchestration["auto_research"]["sources_added_estimate"] += len(auto_sources)
+                orchestration["auto_research"]["claims_added_estimate"] += len(auto_claims)
+            except Exception as exc:
+                orchestration["auto_research"]["error"] = str(exc)
+
+        selected_claims = select_research_claims_for_diagnosis(
+            current_research_evidence,
+            current_diagnosis,
+            memory=cycle_memory,
+        )
+        if auto_research and not selected_claims:
+            orchestration["auto_research"]["attempted"] = True
+            orchestration["auto_research"]["topic"] = topic_value
+            try:
+                auto_sources, auto_claims = _run_auto_improvement_research(
+                    config=config,
+                    topic=topic_value,
+                    max_sources=6,
+                    max_claims=12,
+                    source_type="community",
+                )
+                current_research_evidence = add_research_bundle(
+                    path=research_path,
+                    sources=[dict(item) for item in auto_sources],
+                    claims=[dict(item) for item in auto_claims],
+                    default_source_type="community",
+                )
+                orchestration["auto_research"]["sources_added_estimate"] += len(auto_sources)
+                orchestration["auto_research"]["claims_added_estimate"] += len(auto_claims)
+                selected_claims = select_research_claims_for_diagnosis(
+                    current_research_evidence,
+                    current_diagnosis,
+                    memory=cycle_memory,
+                )
+            except Exception as exc:
+                orchestration["auto_research"]["error"] = str(exc)
+
+        return current_research_evidence, selected_claims
+
+    research_evidence, selected_research_claims = _select_claims_with_auto_research(
+        diagnosis,
+        research_evidence,
+    )
+
+    budget_gate = evaluate_budget_gate(
+        session_count=report.session_count,
+        failure_count=report.failure_count,
+        coding_sessions=report.coding_sessions,
+        no_progress_sessions=report.no_progress_sessions,
+        targets=targets,
+    )
+    budget_gate = enforce_research_requirement(
+        budget_gate,
+        selected_research_claims,
+    )
+
+    if auto_bootstrap and budget_gate.status != "promote" and _is_reliability_hold(budget_gate):
+        requested = (
+            bootstrap_sessions
+            if bootstrap_sessions is not None
+            else _recommended_auto_continue_sessions(report)
+        )
+        requested = max(requested, 1)
+        orchestration["auto_continue"]["attempted"] = True
+        orchestration["auto_continue"]["requested_sessions"] = requested
+        reliability_reasons = [
+            reason
+            for reason in budget_gate.reasons
+            if reason.startswith("failure_rate_exceeded")
+            or reason.startswith("no_progress_rate_exceeded")
+        ]
+        orchestration["auto_continue"]["reason"] = (
+            reliability_reasons[0] if reliability_reasons else "reliability_budget_hold"
+        )
+        try:
+            sampled_sessions, sampled_failures = _run_sampling_sessions(requested)
+            orchestration["auto_continue"]["sampled_sessions"] = sampled_sessions
+            orchestration["auto_continue"]["sampled_failures"] = sampled_failures
+        except Exception as exc:
+            orchestration["auto_continue"]["error"] = str(exc)
+
+        report = analyze_recent_sessions(state_dir=harness.state_dir, window=window)
+        diagnosis = build_diagnosis(report)
+        research_evidence, selected_research_claims = _select_claims_with_auto_research(
+            diagnosis,
+            research_evidence,
+        )
+        budget_gate = evaluate_budget_gate(
+            session_count=report.session_count,
+            failure_count=report.failure_count,
+            coding_sessions=report.coding_sessions,
+            no_progress_sessions=report.no_progress_sessions,
+            targets=targets,
+        )
+        budget_gate = enforce_research_requirement(
+            budget_gate,
+            selected_research_claims,
+        )
+        orchestration["auto_continue"]["post_budget_gate"] = budget_gate.status
+
+    hypotheses = build_hypotheses(diagnosis, selected_research_claims)
+    experiment_plans = build_experiment_plans(hypotheses, targets, selected_research_claims)
+    payload = build_cycle_payload(
+        report=report,
+        targets=targets,
+        diagnosis=diagnosis,
+        budget_gate=budget_gate,
+        hypotheses=hypotheses,
+        experiment_plans=experiment_plans,
+        research_evidence=research_evidence,
+        selected_research_claims=selected_research_claims,
+        cycle_memory=cycle_memory,
+    )
+
+    updated_memory = record_cycle_memory(
+        cycle_memory,
+        generated_at=str(payload.get("generated_at", "")),
+        budget_gate_status=str(payload.get("budget_gate", {}).get("status", "")),
+        primary_bottleneck=str(payload.get("diagnosis", {}).get("primary_bottleneck", "")),
+        selected_claim_ids=[
+            str(item.get("claim_id", "")).strip()
+            for item in selected_research_claims
+            if str(item.get("claim_id", "")).strip()
+        ],
+        hypothesis_ids=[
+            str(item.get("hypothesis_id", "")).strip()
+            for item in payload.get("hypotheses", [])
+            if isinstance(item, dict) and str(item.get("hypothesis_id", "")).strip()
+        ],
+    )
+    save_cycle_memory(memory_path, updated_memory)
+    payload["memory"] = {
+        "recent_cycles": updated_memory.get("cycles", [])[-5:],
+        "claim_usage": updated_memory.get("claim_usage", {}),
+    }
+    payload["orchestration"] = orchestration
+
+    harness.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    json_path = harness.artifacts_dir / "improvement-cycle.json"
+    md_path = harness.artifacts_dir / "improvement-cycle.md"
+    json_path.write_text(json.dumps(payload, indent=2) + "\n")
+    md_path.write_text(render_cycle_markdown(payload))
+
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"sessions_analyzed={report.session_count}")
+        if orchestration["auto_bootstrap"]["attempted"]:
+            print(
+                "auto_bootstrap="
+                f"sessions_requested:{orchestration['auto_bootstrap']['requested_sessions']} "
+                f"sampled:{orchestration['auto_bootstrap']['sampled_sessions']} "
+                f"failures:{orchestration['auto_bootstrap']['sampled_failures']}"
+            )
+        if orchestration["auto_research"]["attempted"]:
+            print(
+                "auto_research="
+                f"sources_added~:{orchestration['auto_research']['sources_added_estimate']} "
+                f"claims_added~:{orchestration['auto_research']['claims_added_estimate']}"
+            )
+        if orchestration["auto_continue"]["attempted"]:
+            print(
+                "auto_continue="
+                f"sessions_requested:{orchestration['auto_continue']['requested_sessions']} "
+                f"sampled:{orchestration['auto_continue']['sampled_sessions']} "
+                f"failures:{orchestration['auto_continue']['sampled_failures']} "
+                f"post_budget_gate:{orchestration['auto_continue']['post_budget_gate'] or budget_gate.status}"
+            )
+        print(
+            f"budget_gate={budget_gate.status} "
+            f"failure_rate={budget_gate.failure_rate:.3f} "
+            f"no_progress_rate={budget_gate.no_progress_rate:.3f}"
+        )
+        print(f"artifacts={json_path}, {md_path}")
+
+    if enforce_budget and budget_gate.status != "promote":
+        return 1
+    return 0
+
+
+def run_improvement_research(
+    *,
+    config_path: Path,
+    list_only: bool,
+    topic: str | None,
+    max_sources: int,
+    max_claims: int,
+    source_id: str | None,
+    title: str | None,
+    url: str | None,
+    source_type: str,
+    claims: list[str] | None,
+    tags: str,
+    notes: str,
+) -> int:
+    if max_sources <= 0:
+        print("--max-sources must be a positive integer", file=sys.stderr)
+        return 2
+    if max_claims <= 0:
+        print("--max-claims must be a positive integer", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    harness = Harness(config)
+    harness.bootstrap()
+
+    research_path = evidence_file_path(harness.artifacts_dir)
+    payload = load_research_evidence(research_path, bootstrap_if_missing=True)
+
+    topic_value = (topic or "").strip()
+    if topic_value:
+        try:
+            auto_sources, auto_claims = _run_auto_improvement_research(
+                config=config,
+                topic=topic_value,
+                max_sources=max_sources,
+                max_claims=max_claims,
+                source_type=source_type,
+            )
+        except Exception as exc:
+            print(f"auto research failed: {exc}", file=sys.stderr)
+            return 1
+
+        payload = add_research_bundle(
+            path=research_path,
+            sources=[dict(item) for item in auto_sources],
+            claims=[dict(item) for item in auto_claims],
+            default_source_type=source_type,
+        )
+        print(f"updated={research_path}")
+        print(
+            f"topic={topic_value} sources_added~={len(auto_sources)} claims_added~={len(auto_claims)}"
+        )
+        print(f"sources={len(payload.get('sources', []))} claims={len(payload.get('claims', []))}")
+        return 0
+
+    adding_requested = any(
+        value is not None and str(value).strip()
+        for value in (source_id, title, url)
+    ) or bool(claims)
+    if adding_requested:
+        if not (source_id and title and url):
+            print(
+                "--source-id/--title/--url are required when adding evidence",
+                file=sys.stderr,
+            )
+            return 2
+        if not claims:
+            print("--claim is required when adding evidence", file=sys.stderr)
+            return 2
+        payload = add_research_evidence(
+            path=research_path,
+            source_id=source_id,
+            title=title,
+            url=url,
+            source_type=source_type,
+            claims=claims,
+            tags=[item for item in tags.split(",") if item.strip()],
+            notes=notes,
+        )
+
+    if list_only or not adding_requested:
+        print(f"evidence_path={research_path}")
+        print(f"sources={len(payload.get('sources', []))} claims={len(payload.get('claims', []))}")
+        for source in payload.get("sources", []):
+            print(
+                f"- {source.get('source_id')} ({source.get('source_type')}): "
+                f"{source.get('name')} -> {source.get('url')}"
+            )
+    else:
+        print(f"updated={research_path}")
+        print(f"sources={len(payload.get('sources', []))} claims={len(payload.get('claims', []))}")
 
     return 0
 
@@ -1446,7 +2369,7 @@ def run_configure(
     if config.backend_name == "codex_cli" and backend_model is not None:
         config.agent_command = _apply_model_to_codex_command(config.agent_command, config.backend_model)
 
-    save_config(config_path, config)
+    save_config(config_path, config, preserve_unmanaged=True)
     print(f"Updated config: {config_path}")
     print(
         f"backend={config.backend_name} profile={config.profile} "
@@ -1494,6 +2417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=resolved_config_path,
             goal=args.goal,
             max_sessions=args.max_sessions,
+            continue_on_failure=args.continue_on_failure,
             backend=args.backend,
             profile=args.profile,
             backend_model=args.backend_model,
@@ -1509,6 +2433,44 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "status":
         return run_status(resolved_config_path, args.json)
+
+    if args.command == "self-improve":
+        return run_self_improve(
+            config_path=resolved_config_path,
+            window=args.window,
+            apply=args.apply,
+        )
+
+    if args.command in {"improvement-cycle", "run-cycle"}:
+        return run_improvement_cycle(
+            config_path=resolved_config_path,
+            window=args.window,
+            max_failure_rate=args.max_failure_rate,
+            max_no_progress_rate=args.max_no_progress_rate,
+            min_sessions=args.min_sessions,
+            auto_bootstrap=args.auto_bootstrap,
+            bootstrap_sessions=args.bootstrap_sessions,
+            auto_research=args.auto_research,
+            topic=args.topic,
+            enforce_budget=args.enforce_budget,
+            as_json=args.json,
+        )
+
+    if args.command == "improvement-research":
+        return run_improvement_research(
+            config_path=resolved_config_path,
+            list_only=args.list,
+            topic=args.topic,
+            max_sources=args.max_sources,
+            max_claims=args.max_claims,
+            source_id=args.source_id,
+            title=args.title,
+            url=args.url,
+            source_type=args.source_type,
+            claims=args.claim,
+            tags=args.tags,
+            notes=args.notes,
+        )
 
     if args.command == "configure":
         return run_configure(

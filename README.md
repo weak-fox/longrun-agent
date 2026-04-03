@@ -27,6 +27,10 @@ longrun-agent go --goal "..."
 longrun-agent run-session [--backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
 longrun-agent run-loop [--max-sessions ... --continue-on-failure --backend ... --profile ... --backend-model ... --model-reasoning-effort ...]
 longrun-agent status [--json]
+longrun-agent self-improve [--window 20] [--apply|--no-apply]
+longrun-agent improvement-cycle [--window 20] [--min-sessions 10] [--auto-bootstrap] [--bootstrap-sessions N] [--auto-research] [--topic "..."] [--enforce-budget] [--json]
+longrun-agent run-cycle [same args as improvement-cycle]
+longrun-agent improvement-research [--list] [--topic "..."] [--max-sources 6] [--max-claims 12]
 ```
 
 ## 自动验证脚本
@@ -42,7 +46,7 @@ longrun-agent status [--json]
 - `bootstrap/configure/run-session/run-loop/status/go` 主路径
 - 关键 gate 与限制项（`commit/progress/repair/clean_git/max_features/max_no_progress/pre_coding/verification`）
 - 运行时覆盖参数传递（`--backend-model`、`--model-reasoning-effort`）
-- 默认外置配置路径（无本地配置时落到 `~/.longrun-agent/configs/...`）
+- 默认本地配置路径（无显式 `--config` 时使用当前目录 `./longrun-agent.toml`）
 
 可选环境变量：
 - `LR_BIN`：指定 `longrun-agent` 可执行文件路径
@@ -56,7 +60,7 @@ Codex 沙箱说明：
 提示：
 - Anthropic “文章同款”模式请使用：`--backend claude_sdk --profile article`
 - 想要最省心的一键流程请使用：`longrun-agent go --goal "..."`
-- 若当前目录没有本地 `longrun-agent.toml`，CLI 默认会把配置写到 `~/.longrun-agent/configs/<project-hash>.toml`
+- 若当前目录没有本地 `longrun-agent.toml`，CLI 会在当前目录创建该文件
 
 ## 核心概念（务必先读）
 
@@ -74,13 +78,31 @@ Codex 沙箱说明：
 
 ## 快速开始（推荐路径）
 
+### Session 1 本地运行（当前仓库默认）
+
+```bash
+bash .longrun/artifacts/init.sh
+source .venv-longrun/bin/activate
+longrun-agent status
+```
+
+本轮初始化后，权威工件路径为：
+- `.longrun/artifacts/app_spec.txt`
+- `.longrun/artifacts/feature_list.json`
+- `.longrun/artifacts/claude-progress.txt`
+- `.longrun/artifacts/init.sh`
+
+关键不变量：
+- 后续 coding session 只允许修改 `.longrun/artifacts/feature_list.json` 中每个条目的 `passes` 字段。
+- 禁止修改 `category` / `description` / `steps` / 顺序 / 数量。
+
 ### 0) 本地初始化（推荐先执行）
 
 ```bash
-./init.sh
+bash .longrun/artifacts/init.sh
 ```
 
-`init.sh` 会自动：
+`.longrun/artifacts/init.sh` 会自动：
 - 创建/复用 `.venv-longrun`
 - 安装当前项目（editable 模式）
 - 在缺少核心文件时执行 `longrun-agent bootstrap`
@@ -212,6 +234,67 @@ longrun-agent status
 longrun-agent status --json
 ```
 
+自我改进（会生成下一轮优化计划）：
+
+```bash
+longrun-agent self-improve --window 20
+```
+
+产物：
+- `.longrun/artifacts/self-improvement-plan.md`
+
+默认自动调参（可 `--no-apply` 关闭）：
+- 若窗口内出现 `verification_commands_pass` 且当前未开启，则自动设置
+  `gates.repair_on_verification_failure = true`
+
+改进控制面循环（架构化地改进 longrun-agent 本身）：
+
+```bash
+longrun-agent improvement-cycle --window 20 --min-sessions 10
+```
+
+`run-cycle` 是等价别名：
+
+```bash
+longrun-agent run-cycle --window 20 --min-sessions 10
+```
+
+产物：
+- `.longrun/artifacts/improvement-cycle.json`
+- `.longrun/artifacts/improvement-cycle.md`
+- `.longrun/artifacts/improvement-memory.json`
+
+研究证据库（持续补充，本地优先）：
+
+```bash
+# 查看当前证据库
+longrun-agent improvement-research --list
+
+# 自动调研（推荐，只给 topic，agent 会做全网调研并入库）
+longrun-agent improvement-research --topic "how to reduce agent run-loop failure rate"
+
+# 手动补充一条来源与 claim（兜底模式，可重复 --claim）
+longrun-agent improvement-research \
+  --source-id community_playbook \
+  --title "Community playbook" \
+  --url "https://example.com/playbook" \
+  --source-type community \
+  --claim "Small batches reduce risk." \
+  --tags "batch_size,risk"
+```
+
+说明：
+- `improvement-cycle` 会先读取 `.longrun/artifacts/improvement-evidence.json`
+- `improvement-cycle` 默认会自动补全通路：
+  - 会话不足时自动采样（`--auto-bootstrap`）
+  - 预算 gate 因可靠性指标 `hold` 时自动继续采样并复评（默认会按当前差距动态放大采样预算，可用 `--bootstrap-sessions` 覆盖）
+  - 证据不足时自动调研（`--auto-research`）
+- Hypotheses/Experiment Plans 必须绑定 `evidence_claim_ids` 与 `source_ids`
+- `improvement-research --topic` 会调用当前 backend 自动调研并提取 sources/claims 入库
+- 证据不足时会被 budget gate 标记为 `hold`
+- `improvement-cycle` 会记录每轮已用 claims 到 `.longrun/artifacts/improvement-memory.json`
+- 下轮会优先选择未使用/少使用 claims，并尽量避免与上一轮完全相同的 claim 集合
+
 ## 一键模式（推荐新手）
 
 ```bash
@@ -221,7 +304,7 @@ longrun-agent go --goal "做一个给小团队用的任务看板"
 默认行为：
 - 使用当前配置的 backend/model（可命令行覆盖）
 - 引导式补全 `app_spec.txt`（默认写到 `.longrun/artifacts/`，支持 agent 反问澄清需求）
-- 自动跑 `run-loop`（默认 `--max-sessions 20`）
+- 自动跑 `run-loop`（默认 `--max-sessions 20`，且默认 `--continue-on-failure`）
 - 默认要求在项目 `.venv-longrun` 中运行（可用 `--allow-any-python` 跳过，属于高级参数）
 - 首次 `go`（无配置文件）会先进入必填配置向导，再继续执行
 
@@ -230,13 +313,14 @@ longrun-agent go --goal "做一个给小团队用的任务看板"
 - `Profile`
 - `Backend model`
 - `Project dir`
-- `State dir`（建议单独目录，如 `~/.longrun-agent/state/...`）
+- `State dir`（默认 `<project_dir>/.longrun`）
 - `commit/progress/repair` 三个 gate 开关
 
 常用参数：
 - `--goal`：产品目标一句话（当 `.longrun/artifacts/app_spec.txt` 未有明确目标时建议必传）
 - `--backend` / `--backend-model`
 - `--max-sessions`
+- `--continue-on-failure` / `--no-continue-on-failure`
 - `--feature-target`
 
 高级参数：
@@ -311,7 +395,7 @@ longrun-agent run-loop --max-sessions 20 --continue-on-failure
 - `state_dir`：harness 状态目录（`sessions/lock/remediation`）；留空时默认 `<project_dir>/.longrun`
 - `artifacts_dir`：业务生成文件目录（`app_spec.txt` / `feature_list.json` / `claude-progress.txt` / `init.sh`）；留空时默认 `<state_dir>/artifacts`
 - `feature_target`：initializer 最少 feature 数（默认 `200`）
-- `max_features_per_session`：单轮最多新增通过 feature 数（默认 `1`）
+- `max_features_per_session`：单轮最多新增通过 feature 数（默认 `3`）
 - `max_no_progress_sessions`：连续无进展熔断阈值（默认 `5`）
 - `pre_coding_commands`：coding 前回归命令（失败即中止当轮）
 - `verification_commands`：会话后验证命令（失败触发 gate）

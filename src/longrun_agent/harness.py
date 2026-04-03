@@ -152,6 +152,11 @@ class Harness:
             try:
                 before_features = load_feature_list(self.feature_file)
             except Exception as exc:
+                self._write_prompt_note(
+                    prompt_file=prompt_file,
+                    phase=phase,
+                    reason=f"feature_list.json cannot be loaded: {exc}",
+                )
                 result = SessionResult(
                     session_id=session_id,
                     phase=phase,
@@ -166,6 +171,11 @@ class Harness:
             try:
                 pending_index, pending_feature = first_pending_feature(before_features)
             except ValueError:
+                self._write_prompt_note(
+                    prompt_file=prompt_file,
+                    phase=phase,
+                    reason="All features already passing",
+                )
                 result = SessionResult(
                     session_id=session_id,
                     phase=phase,
@@ -185,25 +195,32 @@ class Harness:
                 passing=passing_before,
                 total=total,
             )
+            prompt_file.write_text(prompt)
             self._run_bearings_commands(session_dir)
             pre_coding_error = self._run_pre_coding_commands(session_dir)
             if pre_coding_error is not None:
-                result = SessionResult(
+                gate = GateResult(
+                    gate_id="pre_coding_commands_pass",
+                    passed=False,
+                    message=pre_coding_error,
+                    remediation=["write_report", "stop"],
+                )
+                return self._fail_with_gate(
                     session_id=session_id,
                     phase=phase,
-                    success=False,
-                    message=pre_coding_error,
+                    gate=gate,
+                    session_dir=session_dir,
+                    before_features=before_features,
+                    return_code=None,
                     passing=passing_before,
                     total=total,
                 )
-                self._write_session_metadata(session_dir, result)
-                self._append_progress(result)
-                return result
 
             # Keep a recovery copy so we can roll back forbidden mutations.
             shutil.copy(self.feature_file, session_dir / "feature_list.before.json")
 
-        prompt_file.write_text(prompt)
+        if phase == "initializer":
+            prompt_file.write_text(prompt)
 
         try:
             run = self._run_agent_command(phase, prompt_file, session_dir)
@@ -231,6 +248,19 @@ class Harness:
                 readonly_retry_attempted = True
                 run = retried
                 readonly_retry_recovered = not run["timeout"] and run["return_code"] == 0
+        transient_retry_attempted = False
+        transient_retry_recovered = False
+        if not run["timeout"] and run["return_code"] != 0:
+            retried = self._retry_if_transient_backend_failure(
+                phase=phase,
+                prompt_file=prompt_file,
+                session_dir=session_dir,
+                failed_run=run,
+            )
+            if retried is not None:
+                transient_retry_attempted = True
+                run = retried
+                transient_retry_recovered = not run["timeout"] and run["return_code"] == 0
 
         if run["timeout"]:
             timeout_note = (
@@ -238,6 +268,8 @@ class Harness:
                 if readonly_retry_attempted
                 else ""
             )
+            if transient_retry_attempted:
+                timeout_note = f"{timeout_note} (transient backend retry attempted)"
             result = SessionResult(
                 session_id=session_id,
                 phase=phase,
@@ -256,6 +288,8 @@ class Harness:
         if run["return_code"] != 0:
             stderr_tail = self._last_non_empty_log_line(run["stderr_path"])
             retry_note = " (workspace-write retry attempted)" if readonly_retry_attempted else ""
+            if transient_retry_attempted:
+                retry_note = f"{retry_note} (transient backend retry attempted)"
             hint = (
                 " If this keeps failing, use a codex command with "
                 "--dangerously-bypass-approvals-and-sandbox in an isolated environment."
@@ -505,6 +539,8 @@ class Harness:
             )
         if readonly_retry_recovered:
             completion_notes.append("recovered from read-only sandbox via workspace-write retry")
+        if transient_retry_recovered:
+            completion_notes.append("recovered from transient backend failure via retry")
 
         message = "Session completed"
         if completion_notes:
@@ -820,6 +856,32 @@ class Harness:
             metadata={"force_workspace_write": True, "retry_reason": "readonly_sandbox"},
         )
 
+    def _retry_if_transient_backend_failure(
+        self,
+        phase: str,
+        prompt_file: Path,
+        session_dir: Path,
+        failed_run: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self.config.backend_name != "codex_cli":
+            return None
+        if phase not in {"initializer", "coding"}:
+            return None
+        if not self._is_transient_backend_error(
+            stderr_path=failed_run["stderr_path"],
+            stdout_path=failed_run["stdout_path"],
+        ):
+            return None
+
+        retry_dir = session_dir / "retry-transient-backend"
+        retry_dir.mkdir(parents=True, exist_ok=True)
+        return self._run_agent_command(
+            phase=phase,
+            prompt_file=prompt_file,
+            session_dir=retry_dir,
+            metadata={"retry_reason": "transient_backend"},
+        )
+
     @staticmethod
     def _is_readonly_sandbox_error(stderr_path: Path, stdout_path: Path) -> bool:
         chunks: list[str] = []
@@ -836,6 +898,23 @@ class Harness:
             "workspace is read-only",
             "readonly sandbox",
             "只读",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _is_transient_backend_error(stderr_path: Path, stdout_path: Path) -> bool:
+        chunks: list[str] = []
+        for path in (stderr_path, stdout_path):
+            try:
+                chunks.append(path.read_text())
+            except Exception:
+                continue
+        text = "\n".join(chunks).lower()
+        markers = (
+            "stream disconnected before completion",
+            "error sending request for url",
+            "transport error: network error",
+            "error decoding response body",
         )
         return any(marker in text for marker in markers)
 
@@ -1051,9 +1130,24 @@ class Harness:
         )
         run = self._run_agent_command("repair", repair_prompt, session_dir)
         if run["timeout"]:
-            return f"repair session timed out after {self.config.agent_timeout_seconds}s"
+            return (
+                "repair session timed out after "
+                f"{self.config.agent_timeout_seconds}s (logs: "
+                f"{self._display_path(run['stdout_path'])}, "
+                f"{self._display_path(run['stderr_path'])})"
+            )
         if run["return_code"] != 0:
-            return "repair session exited with non-zero status"
+            code = run["return_code"]
+            stderr_tail = self._last_non_empty_log_line(run["stderr_path"])
+            detail = (
+                "repair session exited with non-zero status "
+                f"(code={code}) (logs: "
+                f"{self._display_path(run['stdout_path'])}, "
+                f"{self._display_path(run['stderr_path'])})"
+            )
+            if stderr_tail:
+                detail = f"{detail}; last stderr: {stderr_tail}"
+            return detail
         return None
 
     def _fail_with_gate(
@@ -1073,6 +1167,7 @@ class Harness:
             phase=phase,
             gate=gate,
             before_features=before_features,
+            before_snapshot_path=session_dir / "feature_list.before.json",
         )
         stdout_path = session_dir / "agent.stdout.log"
         stderr_path = session_dir / "agent.stderr.log"
@@ -1139,7 +1234,10 @@ class Harness:
 
             if completed.returncode != 0:
                 log_path.write_text("".join(lines))
-                return f"pre-coding check failed: {command}"
+                return (
+                    "pre-coding command failed: "
+                    f"{command} (log: {self._display_path(log_path)})"
+                )
 
         log_path.write_text("".join(lines))
         return None
@@ -1167,7 +1265,10 @@ class Harness:
 
             if completed.returncode != 0:
                 log_path.write_text("".join(lines))
-                return f"verification command failed: {command}"
+                return (
+                    "verification command failed: "
+                    f"{command} (log: {self._display_path(log_path)})"
+                )
 
         log_path.write_text("".join(lines))
         return None
@@ -1200,6 +1301,14 @@ class Harness:
         payload = asdict(result)
         payload["timestamp"] = datetime.now(UTC).isoformat()
         (session_dir / "session.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+    def _write_prompt_note(self, prompt_file: Path, phase: str, reason: str) -> None:
+        prompt_file.write_text(
+            "# Session Prompt\n\n"
+            "No agent prompt was executed for this session.\n"
+            f"- phase: {phase}\n"
+            f"- reason: {reason}\n"
+        )
 
     def _append_progress(self, result: SessionResult) -> None:
         timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
